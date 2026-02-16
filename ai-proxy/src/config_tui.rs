@@ -288,11 +288,9 @@ async fn run_tui_loop(
         let mut next_provider_id = None;
         if let Screen::AuthInput(state) = screen {
             if state.is_oauth {
-                // If the config now has the credential, it means background task finished
                 if config.has_credential(&state.provider_id).unwrap_or(false) {
                     next_provider_id = Some(state.provider_id.clone());
                 } else {
-                    // Pull URL and instructions from the shared state
                     let info = oauth_callbacks.auth_info.lock().unwrap();
                     if let Some(info) = &*info {
                         state.oauth_url = Some(info.url.clone());
@@ -460,29 +458,35 @@ fn draw(
         Screen::AuthInput(state) => {
             let chunks = Layout::vertical([
                 Constraint::Length(3), 
-                Constraint::Length(5), 
-                Constraint::Min(1)
+                Constraint::Min(5), 
+                Constraint::Length(3),
             ]).split(area);
             
             f.render_widget(Paragraph::new(state.label.as_str()).block(Block::default().borders(Borders::ALL)), chunks[0]);
             
-            let hint_text = Paragraph::new(state.hint.as_str())
-                .wrap(Wrap { trim: true })
-                .style(Style::default().fg(Color::Yellow))
-                .block(Block::default().borders(Borders::ALL).title(" Instructions "));
-            f.render_widget(hint_text, chunks[1]);
+            let mut info_content = vec![
+                Line::from(Span::styled("Instructions: ", Style::default().fg(Color::Yellow))),
+                Line::from(state.hint.as_str()),
+                Line::from(""),
+            ];
             
-            let mut content = Vec::new();
             if let Some(url) = &state.oauth_url {
-                content.push(Line::from(vec![Span::styled("URL: ", Style::default().fg(Color::Cyan)), Span::raw(url)]));
-                content.push(Line::from(""));
+                info_content.push(Line::from(Span::styled("URL: ", Style::default().fg(Color::Cyan))));
+                info_content.push(Line::from(url.as_str()));
             }
-            content.push(Line::from(vec![Span::styled("Input: ", Style::default().fg(Color::White)), Span::raw(&state.input)]));
             
-            let input_para = Paragraph::new(content)
-                .block(Block::default().borders(Borders::ALL).title(" Input (Enter to confirm code, Esc to cancel) "))
-                .wrap(Wrap { trim: true });
-            f.render_widget(input_para, chunks[2]);
+            let info_para = Paragraph::new(info_content)
+                .wrap(Wrap { trim: false }) // Disable trim to preserve long strings wrapping
+                .block(Block::default().borders(Borders::ALL).title(" Auth Info "));
+            f.render_widget(info_para, chunks[1]);
+            
+            let input_text = if state.input.is_empty() {
+                "".to_string()
+            } else {
+                state.input.clone()
+            };
+            
+            f.render_widget(Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).title(" Input (Paste code and Enter) ")), chunks[2]);
         }
         Screen::ModelSelect(state) => {
             let items: Vec<ListItem> = state.models.iter().map(|(id, selected)| {
