@@ -121,7 +121,8 @@ impl Provider for AnthropicProvider {
         };
 
         // Identity Injection for setup-token (Claude Code mimic)
-        let is_setup_token = api_key.starts_with("sk-ant-sid");
+        // setup-tokens usually start with sk-ant-sid
+        let is_setup_token = api_key.contains("sk-ant-sid");
         let mut headers = HashMap::new();
         headers.insert("x-api-key".to_string(), api_key.clone());
         headers.insert("anthropic-version".to_string(), "2023-06-01".to_string());
