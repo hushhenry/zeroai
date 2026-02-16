@@ -20,6 +20,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
+open = { workspace = true }
 tokio-stream = { workspace = true }
 bytes = { workspace = true }
 eventsource-stream = { workspace = true }

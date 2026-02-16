@@ -71,6 +71,8 @@ impl OAuthProvider for AntigravityOAuthProvider {
 
         let auth_url = format!("{}?{}", AUTH_URL, serde_urlencoded::to_string(&params)?);
 
+        let _ = open::that(&auth_url);
+
         callbacks.on_auth(OAuthAuthInfo {
             url: auth_url,
             instructions: Some("Complete the sign-in in your browser.".into()),

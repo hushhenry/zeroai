@@ -65,9 +65,11 @@ impl OAuthProvider for GeminiCliOAuthProvider {
 
         let auth_url = format!("{}?{}", AUTH_URL, serde_urlencoded::to_string(&params)?);
 
+        let _ = open::that(&auth_url);
+
         callbacks.on_auth(OAuthAuthInfo {
             url: auth_url,
-            instructions: Some("Visit the URL, authorize the app, and paste the code below.".into()),
+            instructions: Some("Authorization page opened in your browser. If not, visit the URL above. Paste the code from the success page below.".into()),
         });
 
         let code = callbacks

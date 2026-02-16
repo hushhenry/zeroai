@@ -23,7 +23,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::io::{self, stdout};
@@ -140,7 +140,7 @@ async fn run_tui_loop(
     loop {
         terminal.draw(|f| draw(f, &config, groups, screen, group_state, sub_state))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(());
@@ -166,7 +166,7 @@ async fn run_tui_loop(
                                         let (_, providers) = &groups[idx];
                                         if providers.len() == 1 {
                                             let prov = &providers[0];
-                                            handle_provider_select(&config, prov, screen, oauth_callbacks.clone()).await?;
+                                            handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
                                         } else {
                                             sub_state.select(Some(0));
                                             *screen = Screen::SubProviders(idx);
@@ -197,7 +197,7 @@ async fn run_tui_loop(
                                 if let Some(idx) = sub_state.selected() {
                                     if idx < providers.len() {
                                         let prov = &providers[idx];
-                                        handle_provider_select(&config, prov, screen, oauth_callbacks.clone()).await?;
+                                        handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
                                     }
                                 }
                             }
@@ -221,7 +221,7 @@ async fn run_tui_loop(
                                         let mut res = oauth_callbacks.prompt_result.lock().unwrap();
                                         *res = Some(state.input.clone());
                                         state.input.clear();
-                                        state.hint = "Processing...".into();
+                                        state.hint = "Exchanging code for token...".into();
                                     } else {
                                         let provider_id = state.provider_id.clone();
                                         let input = state.input.clone();
@@ -288,9 +288,11 @@ async fn run_tui_loop(
         let mut next_provider_id = None;
         if let Screen::AuthInput(state) = screen {
             if state.is_oauth {
+                // If the config now has the credential, it means background task finished
                 if config.has_credential(&state.provider_id).unwrap_or(false) {
                     next_provider_id = Some(state.provider_id.clone());
                 } else {
+                    // Pull URL and instructions from the shared state
                     let info = oauth_callbacks.auth_info.lock().unwrap();
                     if let Some(info) = &*info {
                         state.oauth_url = Some(info.url.clone());
@@ -308,7 +310,7 @@ async fn run_tui_loop(
 }
 
 async fn handle_provider_select(
-    config: &ConfigManager,
+    config: ConfigManager,
     prov: &ProviderAuthInfo,
     screen: &mut Screen,
     callbacks: Arc<TuiOAuthCallbacks>,
@@ -316,18 +318,18 @@ async fn handle_provider_select(
     let provider_id = prov.provider_id.clone();
 
     if config.has_credential(&provider_id).unwrap_or(false) {
-        return enter_model_selection(config, &provider_id, screen).await;
+        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
     if let Some(cred) = auth::sniff::sniff_external_credential(&provider_id) {
         config.set_credential(&provider_id, cred)?;
-        return enter_model_selection(config, &provider_id, screen).await;
+        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
     if let Some(key) = auth::sniff::env_api_key(&provider_id) {
         let cred = Credential::ApiKey(ApiKeyCredential { key });
         config.set_credential(&provider_id, cred)?;
-        return enter_model_selection(config, &provider_id, screen).await;
+        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
     let method = prov.auth_methods.first().cloned().unwrap_or(AuthMethod::ApiKey {
@@ -379,7 +381,7 @@ async fn handle_provider_select(
                 provider_id: provider_id.clone(),
                 label: format!("OAuth for {}", prov.label),
                 input: String::new(),
-                hint: hint.unwrap_or_else(|| "Opening browser...".into()),
+                hint: hint.unwrap_or_else(|| "Connecting to Google...".into()),
                 is_oauth: true,
                 oauth_url: None,
             });
@@ -456,14 +458,31 @@ fn draw(
             f.render_stateful_widget(list, area, sub_state);
         }
         Screen::AuthInput(state) => {
-            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(1)]).split(area);
+            let chunks = Layout::vertical([
+                Constraint::Length(3), 
+                Constraint::Length(5), 
+                Constraint::Min(1)
+            ]).split(area);
+            
             f.render_widget(Paragraph::new(state.label.as_str()).block(Block::default().borders(Borders::ALL)), chunks[0]);
-            f.render_widget(Paragraph::new(state.hint.as_str()).style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL).title(" Hint ")), chunks[1]);
-            let mut input_text = state.input.clone();
+            
+            let hint_text = Paragraph::new(state.hint.as_str())
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(Color::Yellow))
+                .block(Block::default().borders(Borders::ALL).title(" Instructions "));
+            f.render_widget(hint_text, chunks[1]);
+            
+            let mut content = Vec::new();
             if let Some(url) = &state.oauth_url {
-                input_text = format!("URL: {}\n\nInput: {}", url, input_text);
+                content.push(Line::from(vec![Span::styled("URL: ", Style::default().fg(Color::Cyan)), Span::raw(url)]));
+                content.push(Line::from(""));
             }
-            f.render_widget(Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).title(" Input (Enter confirm, Esc cancel) ")), chunks[2]);
+            content.push(Line::from(vec![Span::styled("Input: ", Style::default().fg(Color::White)), Span::raw(&state.input)]));
+            
+            let input_para = Paragraph::new(content)
+                .block(Block::default().borders(Borders::ALL).title(" Input (Enter to confirm code, Esc to cancel) "))
+                .wrap(Wrap { trim: true });
+            f.render_widget(input_para, chunks[2]);
         }
         Screen::ModelSelect(state) => {
             let items: Vec<ListItem> = state.models.iter().map(|(id, selected)| {
