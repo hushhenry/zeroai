@@ -127,7 +127,7 @@ fn to_claude_code_name(name: &str) -> String {
 
 fn from_claude_code_name(name: &str, requested_tools: &[ToolDef]) -> String {
     let lower = name.to_lowercase();
-    // Prioritize mapping back to the exact casing the user originally requested
+    // Search the original tools requested by the user to find the matching name
     for tool in requested_tools {
         if tool.name.to_lowercase() == lower {
             return tool.name.clone();
