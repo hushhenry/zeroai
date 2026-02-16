@@ -1,0 +1,69 @@
+我想用 rust 实现一个 ai-rs 库
+1. 集成 genai 实现对不同 provider 的请求
+2. 为 genai 扩展 models 方法用于获取模型列表
+   - 参考 openclaw 的源码中的实现
+   - anthropic这样无法获取动态模型列表的，请写一个静态列表，参考 openclaw 中的定义
+   - 如果获取模型列表的逻辑比较复杂，例如 anthropic 是一个很长的列表，应该封装到独立的函数里
+3. 添加一个 ModelMapper 用于模型映射
+   - 模型命名规则为 `<provider>/<model>`，根据 `<provider>` 来路由，调用底层 provider 的时候传入 `<model>`
+   - 同一个 provider 由于 auth 方式不同，模型的鉴权方式、请求体、响应体都有些许不同，因此 google 这样的 provider 只作为一级菜单，而 gemini api key、antigravity oauth、gemini cli oauth 这样的二级菜单才是真实的 provider，provider 分别命名为 google、antigravity、gemini-cli。
+   - 对于返回值和流式返回值中的模型名称，应该拼接上传入的 provider。
+4. 补全 provider，例如 gemini cli oauth、antigravity 等，需要支持 openclaw 支持的所有列表
+5. 添加一个 auth 模块用于管理 credentials
+   - 可以指定配置文件的存储路径，默认为 ~/.ai-rs/config.json，其中包含 provider 的 credentials、启用的模型列表。
+   - 支持 auth 嗅探，例如扫描已有的 auth 文件 ~/.gemini/oauth_creds.json，将其存储到本项目的配置文件中。你帮我搜集一个完整的 auth 文件列表。
+   - 支持环境变量嗅探，例如 OPENAI_API_KEY 等，将其存储到本项目的配置文件中。你帮我搜集一个完整的环境变量列表。
+   - 支持手动填入 api-key
+   - 支持选择 oauth 登录，然后发起 OAuth 流程，最终拿到 OAuth 授权凭证
+   - 提供函数接口用于
+     - 列出支持的 provider 列表
+     - 列出 provider 支持的 auth 方式
+     - 不同的 auth 方式的 provider 名称应该不同。例如 google 是一个 provider 分类，而其中包含 gemini api key、antigravity oauth、gemini cli oauth。
+     - 如果是 api-key 方式，那么提供函数来填写 api-key，持久化到配置文件中。注意配置文件的写入必须安全（避免并发写），不能丢失配置项。
+     - 如果是 oauth 方式，那么提供函数来生成 oauth url，并支持回填 device token
+     - 如果是 anthropic 的 setup-token 格式，那么支持返回一个 hint，提示用户使用 claude setup-token 生成 token，并支持回填 setup-token
+   - 请列举所有可能的情况，为这个模块设计良好的抽象
+   - 需要支持 openclaw 支持的所有 provider 和 auth 方案
+6. 创建一个 ai proxy 模块
+   - 提供 /v1/models 接口，列举当前已配置的所有供应商的所有模型，模型命名为 `<provider>/<model>`。
+   - 提供 /v1/chat/completion 接口，提供 openai 兼容的 API 接口
+   - 提供 /v1/messages 接口，提供 anthropic 兼容的 API 接口
+   - 设计为本地运行，不需要鉴权
+   - 支持 serve 命令，用于启动 http proxy
+   - 支持 config 命令，用于启动一个 tui 界面，首先展示一级菜单的 provider，选中之后展示二级菜单（如果有的话）
+     - 首先检查配置文件里是否已有credentials，如果已经配置过那么应该展示绿色表示已配置，已配置的情况下应该跳过鉴权的步骤，直接获取 models 列表，并且以多选组件展示 models 列表，用来选择启用哪些模型，支持全选/反选，对于已启用的 models 应该渲染成勾选的状态
+     - 如果没有 credentials，尝试嗅探外部 credentials，如果嗅探成功那么跳过鉴权的步骤，直接获取 models 列表（如果获取 models 列表失败那么表示嗅探到的 credentials 无效，依然要启动 auth 流程）
+     - auth 流程
+       - 二级菜单中如果是填 api-key 或者 setup-token，那么选中后就展示输入组件，支持粘贴
+       - 如果是 oauth，那么就输出 oauth url，并展示一个输入组件用于等待用户回填 device token
+     - 填入 auth 信息之后立即保存到文件里，避免程序退出后丢失（就算取消重试也不需要重复登录了）
+     - auth 成功之后获取 models 列表，展示一个多选组件，用来选择启用哪些模型，支持全选/反选
+     - 选择完确认后更新配置文件里的 models 列表
+   - 支持 doctor 命令，用于检查配置文件中的 provider 是否有效，每个 provider 随机选择一个模型，也可以通过命令行参数指定模型，指定模型用 `<provider>/<model>` ，此时只检查一个 provider 的一个模型。
+     - 检查的 request 应该带工具调用，检查 AI 工具调用和工具调用结果回传是否正常。每个模型的流式和非流式检查结果都要列出来。
+
+上述所说的内容分为两个 cargo crate，ai 和 ai-proxy。ai 模块包含 1、2、3、4、5 中所有的内容，而 ai-proxy 只包含 6 中的内容。ai-proxy 调用 llm 接口、获取 models 列表、读写 config、生成 oauth url 和回填信息等，都是调用 ai 模块实现的，因此你需要设计合适的解耦的接口。我还会在别的项目中调用 ai 模块实现类似的功能，因此务必要做到高内聚、低耦合。
+
+获取模型列表、OAuth、补全 provider（例如 gemini oauth cli 的非标准输入输出结构）都要参考 openclaw 和 pi-mono 的源码来实现。
+
+环境变量嗅探列表
+- OPENAI_API_KEY
+- ANTHROPIC_API_KEY
+- GEMINI_API_KEY
+- DEEPSEEK_API_KEY
+- GROQ_API_KEY
+- TOGETHER_API_KEY
+- SILICONFLOW_API_KEY
+- ZHIPUAI_API_KEY
+- FIREWORKS_API_KEY
+- NEBIUS_API_KEY
+
+外部凭证文件扫描路径
+- ~/.gemini/oauth_creds.json (Google)
+- ~/.config/gcloud/application_default_credentials.json (Google)
+- ~/.anthropic/config.json (Anthropic)
+- ~/.openai/auth.json (OpenAI CLI)
+
+参考源码路径
+- openclaw 源码路径: /home/hush/.openclaw/workspace/openclaw
+- pi-mono 源码路径: /home/hush/.openclaw/workspace/pi-mono

@@ -1,0 +1,62 @@
+pub mod anthropic;
+pub mod google_antigravity;
+pub mod google_gemini_cli;
+pub mod pkce;
+
+use async_trait::async_trait;
+
+/// Information about the OAuth authorization URL.
+#[derive(Debug, Clone)]
+pub struct OAuthAuthInfo {
+    pub url: String,
+    pub instructions: Option<String>,
+}
+
+/// Prompt to show to the user during OAuth.
+#[derive(Debug, Clone)]
+pub struct OAuthPrompt {
+    pub message: String,
+    pub placeholder: Option<String>,
+}
+
+/// Callbacks for the OAuth login flow.
+#[async_trait]
+pub trait OAuthCallbacks: Send + Sync {
+    /// Called when the user should open a URL in their browser.
+    fn on_auth(&self, info: OAuthAuthInfo);
+    /// Called when the user needs to input a value (e.g. authorization code).
+    async fn on_prompt(&self, prompt: OAuthPrompt) -> anyhow::Result<String>;
+    /// Called with progress messages.
+    fn on_progress(&self, message: &str);
+}
+
+/// Credentials returned from OAuth login.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OAuthCredentials {
+    pub refresh: String,
+    pub access: String,
+    /// Expiry timestamp in milliseconds since epoch.
+    pub expires: i64,
+    /// Extra data (e.g. `projectId` for Google).
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Trait for OAuth provider implementations.
+#[async_trait]
+pub trait OAuthProvider: Send + Sync {
+    /// Provider ID (e.g. "anthropic", "gemini-cli", "antigravity").
+    fn id(&self) -> &str;
+
+    /// Human-readable name.
+    fn name(&self) -> &str;
+
+    /// Run the login flow.
+    async fn login(&self, callbacks: &dyn OAuthCallbacks) -> anyhow::Result<OAuthCredentials>;
+
+    /// Refresh an expired token.
+    async fn refresh_token(&self, credentials: &OAuthCredentials) -> anyhow::Result<OAuthCredentials>;
+
+    /// Convert credentials to an API key string.
+    fn get_api_key(&self, credentials: &OAuthCredentials) -> String;
+}
