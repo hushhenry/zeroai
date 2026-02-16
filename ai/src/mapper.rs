@@ -25,7 +25,7 @@ impl ModelMapper {
     pub fn new() -> Self {
         let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
 
-        // OpenAI-compatible providers all share the same OpenAI provider implementation
+        // OpenAI-compatible providers
         let openai = Arc::new(OpenAiProvider::new());
         providers.insert("openai".into(), openai.clone());
         providers.insert("deepseek".into(), openai.clone());
@@ -37,9 +37,21 @@ impl ModelMapper {
         providers.insert("fireworks".into(), openai.clone());
         providers.insert("nebius".into(), openai.clone());
         providers.insert("openrouter".into(), openai.clone());
+        providers.insert("minimax".into(), openai.clone());
+        providers.insert("moonshot".into(), openai.clone());
+        providers.insert("qianfan".into(), openai.clone());
+        providers.insert("ollama".into(), openai.clone());
+        providers.insert("vllm".into(), openai.clone());
+        providers.insert("huggingface".into(), openai.clone());
+        providers.insert("github-copilot".into(), openai.clone());
+        providers.insert("amazon-bedrock".into(), openai.clone()); // Placeholder
 
-        // Anthropic
-        providers.insert("anthropic".into(), Arc::new(AnthropicProvider::new()));
+        // Anthropic-compatible providers
+        let anthropic = Arc::new(AnthropicProvider::new());
+        providers.insert("anthropic".into(), anthropic.clone());
+        providers.insert("xiaomi".into(), anthropic.clone());
+        providers.insert("synthetic".into(), anthropic.clone());
+        providers.insert("cloudflare-ai-gateway".into(), anthropic.clone());
 
         // Google (API key)
         providers.insert("google".into(), Arc::new(GoogleProvider::new()));

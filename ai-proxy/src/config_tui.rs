@@ -442,9 +442,11 @@ fn draw(
                 let has_any_cred = providers.iter().any(|p| config.has_credential(&p.provider_id).unwrap_or(false));
                 let marker = if has_any_cred { "●" } else { "○" };
                 let color = if has_any_cred { COLOR_GREEN } else { Color::White };
+                
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", marker), Style::default().fg(color)),
-                    Span::raw(format!("{} - ", label)),
+                    Span::styled(format!("{: <15}", label), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" - "),
                     Span::styled(providers[0].hint.as_str(), Style::default().fg(COLOR_GRAY)),
                 ]))
             }).collect();
@@ -468,9 +470,11 @@ fn draw(
                 let has_cred = config.has_credential(&p.provider_id).unwrap_or(false);
                 let marker = if has_cred { "●" } else { "○" };
                 let color = if has_cred { COLOR_GREEN } else { Color::White };
+                
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", marker), Style::default().fg(color)),
-                    Span::raw(format!("{} - ", p.label)),
+                    Span::styled(format!("{: <25}", p.label), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" - "),
                     Span::styled(p.hint.as_str(), Style::default().fg(COLOR_GRAY)),
                 ]))
             }).collect();
@@ -491,11 +495,11 @@ fn draw(
         Screen::AuthInput(state) => {
             let has_info = !state.hint.is_empty() || state.oauth_url.is_some();
             let mut constraints = vec![
-                Constraint::Length(3), // Label
-                Constraint::Length(3), // Input
+                Constraint::Length(3), 
+                Constraint::Length(3), 
             ];
             if has_info {
-                constraints.push(Constraint::Min(3)); // Instructions/URL
+                constraints.push(Constraint::Min(3)); 
             }
             let chunks = Layout::vertical(constraints).split(area);
             
@@ -518,7 +522,7 @@ fn draw(
                 
                 if let Some(url) = &state.oauth_url {
                     info_content.push(Line::from(""));
-                    info_content.push(Line::from(Span::styled("URL (copy below):", Style::default().fg(COLOR_CYAN))));
+                    info_content.push(Line::from(Span::styled("Clean URL (copy below):", Style::default().fg(COLOR_CYAN))));
                     info_content.push(Line::from(url.as_str()));
                 }
                 
