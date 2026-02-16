@@ -23,7 +23,8 @@ fn get_client_secret() -> String {
         .collect::<Vec<u8>>();
     String::from_utf8(bytes).unwrap_or_default()
 }
-const REDIRECT_URI: &str = "http://localhost:8085/oauth2callback";
+
+const REDIRECT_URI_OOB: &str = "https://codeassist.google.com/authcode";
 const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -32,10 +33,6 @@ const SCOPES: &[&str] = &[
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
-
-fn decode(b64: &str) -> String {
-    String::from_utf8(STANDARD.decode(b64).unwrap_or_default()).unwrap_or_default()
-}
 
 /// Google Gemini CLI OAuth provider (Cloud Code Assist).
 pub struct GeminiCliOAuthProvider;
@@ -58,11 +55,10 @@ impl OAuthProvider for GeminiCliOAuthProvider {
         let params = [
             ("client_id", client_id.as_str()),
             ("response_type", "code"),
-            ("redirect_uri", REDIRECT_URI),
+            ("redirect_uri", REDIRECT_URI_OOB),
             ("scope", &scopes),
             ("code_challenge", &pkce.challenge),
             ("code_challenge_method", "S256"),
-            ("state", &pkce.verifier),
             ("access_type", "offline"),
             ("prompt", "consent"),
         ];
@@ -71,26 +67,17 @@ impl OAuthProvider for GeminiCliOAuthProvider {
 
         callbacks.on_auth(OAuthAuthInfo {
             url: auth_url,
-            instructions: Some("Complete the sign-in in your browser. The callback will be received on localhost:8085.".into()),
+            instructions: Some("Visit the URL, authorize the app, and paste the code below.".into()),
         });
 
-        // In a TUI/CLI context, we'd start a local server here.
-        // For now, prompt the user to paste the redirect URL.
-        let redirect_url = callbacks
+        let code = callbacks
             .on_prompt(OAuthPrompt {
-                message: "Paste the redirect URL from your browser (or wait for automatic callback):".into(),
-                placeholder: Some("http://localhost:8085/oauth2callback?code=...&state=...".into()),
+                message: "Enter authorization code:".into(),
+                placeholder: None,
             })
             .await?;
 
-        let parsed = url::Url::parse(&redirect_url)?;
-        let code = parsed
-            .query_pairs()
-            .find(|(k, _)| k == "code")
-            .map(|(_, v)| v.to_string())
-            .ok_or_else(|| anyhow::anyhow!("No authorization code in redirect URL"))?;
-
-        callbacks.on_progress("Exchanging authorization code for tokens...");
+        callbacks.on_progress("Exchanging code for tokens...");
 
         let client_secret = get_client_secret();
         let client = reqwest::Client::new();
@@ -101,7 +88,7 @@ impl OAuthProvider for GeminiCliOAuthProvider {
                 ("client_secret", client_secret.as_str()),
                 ("code", &code),
                 ("grant_type", "authorization_code"),
-                ("redirect_uri", REDIRECT_URI),
+                ("redirect_uri", REDIRECT_URI_OOB),
                 ("code_verifier", &pkce.verifier),
             ])
             .send()
@@ -123,7 +110,7 @@ impl OAuthProvider for GeminiCliOAuthProvider {
         let refresh = token.refresh_token
             .ok_or_else(|| anyhow::anyhow!("No refresh token received"))?;
 
-        callbacks.on_progress("Discovering Cloud Code Assist project...");
+        callbacks.on_progress("Discovering project...");
         let project_id = discover_project(&token.access_token, callbacks).await?;
 
         let expires = chrono::Utc::now().timestamp_millis() + token.expires_in * 1000 - 5 * 60 * 1000;
@@ -144,7 +131,7 @@ impl OAuthProvider for GeminiCliOAuthProvider {
             .extra
             .get("projectId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing projectId in credentials"))?
+            .ok_or_else(|| anyhow::anyhow!("Missing projectId"))?
             .to_string();
 
         let client_id = get_client_id();
@@ -164,7 +151,7 @@ impl OAuthProvider for GeminiCliOAuthProvider {
 
         if !resp.status().is_success() {
             let body = resp.text().await?;
-            anyhow::bail!("Google Cloud token refresh failed: {}", body);
+            anyhow::bail!("Refresh failed: {}", body);
         }
 
         #[derive(Deserialize)]
@@ -189,126 +176,52 @@ impl OAuthProvider for GeminiCliOAuthProvider {
     }
 
     fn get_api_key(&self, credentials: &OAuthCredentials) -> String {
-        let project_id = credentials
-            .extra
-            .get("projectId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        serde_json::json!({
-            "token": credentials.access,
-            "projectId": project_id
-        })
-        .to_string()
+        let project_id = credentials.extra.get("projectId").and_then(|v| v.as_str()).unwrap_or("");
+        serde_json::json!({ "token": credentials.access, "projectId": project_id }).to_string()
     }
 }
 
-/// Discover or provision a Cloud Code Assist project.
-async fn discover_project(
-    access_token: &str,
-    callbacks: &dyn OAuthCallbacks,
-) -> anyhow::Result<String> {
-    // Check env var first
-    if let Ok(project) = std::env::var("GOOGLE_CLOUD_PROJECT") {
-        if !project.is_empty() {
-            return Ok(project);
-        }
-    }
-    if let Ok(project) = std::env::var("GOOGLE_CLOUD_PROJECT_ID") {
-        if !project.is_empty() {
-            return Ok(project);
-        }
-    }
-
-    callbacks.on_progress("Checking for existing Cloud Code Assist project...");
-
+async fn discover_project(access_token: &str, callbacks: &dyn OAuthCallbacks) -> anyhow::Result<String> {
+    if let Ok(project) = std::env::var("GOOGLE_CLOUD_PROJECT") { return Ok(project); }
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/v1internal:loadCodeAssist", CODE_ASSIST_ENDPOINT))
         .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-        .header("X-Goog-Api-Client", "gl-node/22.17.0")
-        .json(&serde_json::json!({
-            "metadata": {
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED",
-                "pluginType": "GEMINI"
-            }
-        }))
+        .json(&serde_json::json!({ "metadata": { "ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" } }))
         .send()
         .await?;
 
     if resp.status().is_success() {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct LoadResp {
-            cloudaicompanion_project: Option<String>,
-        }
-
-        let data: LoadResp = resp.json().await?;
-        if let Some(project) = data.cloudaicompanion_project {
-            if !project.is_empty() {
-                return Ok(project);
-            }
+        struct LoadResp { cloudaicompanion_project: Option<String> }
+        if let Ok(data) = resp.json::<LoadResp>().await {
+            if let Some(p) = data.cloudaicompanion_project { return Ok(p); }
         }
     }
 
-    // Try onboarding with free tier
-    callbacks.on_progress("Provisioning Cloud Code Assist project (this may take a moment)...");
-
+    callbacks.on_progress("Provisioning project...");
     let onboard_resp = client
         .post(format!("{}/v1internal:onboardUser", CODE_ASSIST_ENDPOINT))
         .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "google-cloud-sdk vscode_cloudshelleditor/0.1")
-        .header("X-Goog-Api-Client", "gl-node/22.17.0")
-        .json(&serde_json::json!({
-            "tierId": "free-tier",
-            "metadata": {
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED",
-                "pluginType": "GEMINI"
-            }
-        }))
+        .json(&serde_json::json!({ "tierId": "free-tier", "metadata": { "ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" } }))
         .send()
         .await?;
 
-    if !onboard_resp.status().is_success() {
-        let body = onboard_resp.text().await?;
-        anyhow::bail!("onboardUser failed: {}", body);
-    }
-
     #[derive(Deserialize)]
-    #[allow(dead_code)]
-    struct OnboardResp {
-        done: Option<bool>,
-        name: Option<String>,
-        response: Option<OnboardResponse>,
-    }
-
+    struct OnboardResp { response: Option<OnboardResponse> }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct OnboardResponse {
-        cloudaicompanion_project: Option<ProjectId>,
-    }
-
+    struct OnboardResponse { cloudaicompanion_project: Option<ProjectId> }
     #[derive(Deserialize)]
-    struct ProjectId {
-        id: Option<String>,
-    }
+    struct ProjectId { id: Option<String> }
 
-    let data: OnboardResp = onboard_resp.json().await?;
-
-    if let Some(resp) = data.response {
-        if let Some(project) = resp.cloudaicompanion_project {
-            if let Some(id) = project.id {
-                return Ok(id);
+    if let Ok(data) = onboard_resp.json::<OnboardResp>().await {
+        if let Some(r) = data.response {
+            if let Some(p) = r.cloudaicompanion_project {
+                if let Some(id) = p.id { return Ok(id); }
             }
         }
     }
-
-    anyhow::bail!(
-        "Could not discover or provision a Google Cloud project. \
-         Try setting GOOGLE_CLOUD_PROJECT environment variable."
-    )
+    anyhow::bail!("Project discovery failed")
 }

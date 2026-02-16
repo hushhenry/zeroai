@@ -166,7 +166,7 @@ async fn run_tui_loop(
                                         let (_, providers) = &groups[idx];
                                         if providers.len() == 1 {
                                             let prov = &providers[0];
-                                            handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
+                                            handle_provider_select(&config, prov, screen, oauth_callbacks.clone()).await?;
                                         } else {
                                             sub_state.select(Some(0));
                                             *screen = Screen::SubProviders(idx);
@@ -197,7 +197,7 @@ async fn run_tui_loop(
                                 if let Some(idx) = sub_state.selected() {
                                     if idx < providers.len() {
                                         let prov = &providers[idx];
-                                        handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
+                                        handle_provider_select(&config, prov, screen, oauth_callbacks.clone()).await?;
                                     }
                                 }
                             }
@@ -308,7 +308,7 @@ async fn run_tui_loop(
 }
 
 async fn handle_provider_select(
-    config: ConfigManager,
+    config: &ConfigManager,
     prov: &ProviderAuthInfo,
     screen: &mut Screen,
     callbacks: Arc<TuiOAuthCallbacks>,
@@ -316,18 +316,18 @@ async fn handle_provider_select(
     let provider_id = prov.provider_id.clone();
 
     if config.has_credential(&provider_id).unwrap_or(false) {
-        return enter_model_selection(&config, &provider_id, screen).await;
+        return enter_model_selection(config, &provider_id, screen).await;
     }
 
     if let Some(cred) = auth::sniff::sniff_external_credential(&provider_id) {
         config.set_credential(&provider_id, cred)?;
-        return enter_model_selection(&config, &provider_id, screen).await;
+        return enter_model_selection(config, &provider_id, screen).await;
     }
 
     if let Some(key) = auth::sniff::env_api_key(&provider_id) {
         let cred = Credential::ApiKey(ApiKeyCredential { key });
         config.set_credential(&provider_id, cred)?;
-        return enter_model_selection(&config, &provider_id, screen).await;
+        return enter_model_selection(config, &provider_id, screen).await;
     }
 
     let method = prov.auth_methods.first().cloned().unwrap_or(AuthMethod::ApiKey {
