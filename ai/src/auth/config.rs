@@ -170,6 +170,7 @@ impl ConfigManager {
                         "antigravity" => Box::new(crate::oauth::google_antigravity::AntigravityOAuthProvider),
                         "openai-codex" => Box::new(crate::oauth::openai_codex::OpenAiCodexOAuthProvider),
                         "github-copilot" => Box::new(crate::oauth::github_copilot::GitHubCopilotOAuthProvider),
+                        "qwen" => Box::new(crate::oauth::qwen_portal::QwenPortalOAuthProvider),
                         _ => return Ok(cred.api_key()), // Unknown provider, can't refresh
                     };
 

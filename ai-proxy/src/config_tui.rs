@@ -375,6 +375,7 @@ async fn handle_provider_select(
                     "antigravity" => Box::new(AntigravityOAuthProvider),
                     "openai-codex" => Box::new(ai::oauth::openai_codex::OpenAiCodexOAuthProvider),
                     "github-copilot" => Box::new(ai::oauth::github_copilot::GitHubCopilotOAuthProvider),
+                    "qwen" => Box::new(ai::oauth::qwen_portal::QwenPortalOAuthProvider),
                     _ => return,
                 };
                 if let Ok(creds) = oauth_provider.login(&*callbacks).await {

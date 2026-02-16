@@ -4,6 +4,7 @@ pub mod google_antigravity;
 pub mod google_gemini_cli;
 pub mod openai_codex;
 pub mod pkce;
+pub mod qwen_portal;
 
 use async_trait::async_trait;
 

@@ -229,6 +229,16 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
                 hint: None,
             }],
         },
+        ProviderAuthInfo {
+            provider_id: "qwen".into(),
+            label: "Qwen API key".into(),
+            group: "Qwen".into(),
+            hint: "Standard API key".into(),
+            auth_methods: vec![AuthMethod::ApiKey {
+                env_var: Some("QWEN_API_KEY".into()),
+                hint: None,
+            }],
+        },
         // Qianfan Group
         ProviderAuthInfo {
             provider_id: "qianfan".into(),
