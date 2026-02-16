@@ -1,3 +1,10 @@
+#!/bin/bash
+cd ai/src/auth
+# Modify all_provider_auth_info to include setup-token as a separate sub-provider for clarity
+# or modify the grouping. 
+# Better: add an explicit "Anthropic (setup-token)" sub-provider to the list.
+
+cat > mod.rs << 'RS'
 pub mod config;
 pub mod sniff;
 
@@ -116,7 +123,7 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
             }],
         },
         ProviderAuthInfo {
-            provider_id: "anthropic".into(), // Same ID, ModelMapper will handle
+            provider_id: "anthropic-setup".into(),
             label: "Anthropic Setup Token".into(),
             group: "Anthropic".into(),
             hint: "From claude setup-token".into(),
@@ -188,3 +195,4 @@ pub fn provider_groups() -> Vec<(String, Vec<ProviderAuthInfo>)> {
     }
     groups
 }
+RS

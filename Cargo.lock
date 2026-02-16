@@ -45,6 +45,7 @@ version = "0.1.0"
 dependencies = [
  "ai",
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "clap",
@@ -55,11 +56,13 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

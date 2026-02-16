@@ -18,6 +18,7 @@ pub struct AppConfig {
 }
 
 /// Manages reading/writing the config file with safe atomic writes.
+#[derive(Clone)]
 pub struct ConfigManager {
     path: PathBuf,
 }

@@ -5,7 +5,14 @@ use ai::{
         ProviderAuthInfo,
     },
     models::static_models::static_models_for_provider,
+    oauth::{
+        anthropic::AnthropicOAuthProvider,
+        google_antigravity::AntigravityOAuthProvider,
+        google_gemini_cli::GeminiCliOAuthProvider,
+        OAuthProvider, OAuthCallbacks, OAuthAuthInfo, OAuthPrompt,
+    },
 };
+use async_trait::async_trait;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -20,6 +27,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, stdout};
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // TUI states
@@ -48,6 +56,46 @@ struct ModelSelectState {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth Callbacks for TUI
+// ---------------------------------------------------------------------------
+
+struct TuiOAuthCallbacks {
+    auth_info: Arc<Mutex<Option<OAuthAuthInfo>>>,
+    prompt_result: Arc<Mutex<Option<String>>>,
+    _waiting_for_prompt: Arc<Mutex<bool>>,
+    _progress: Arc<Mutex<String>>,
+}
+
+#[async_trait]
+impl OAuthCallbacks for TuiOAuthCallbacks {
+    fn on_auth(&self, info: OAuthAuthInfo) {
+        let mut lock = self.auth_info.lock().unwrap();
+        *lock = Some(info);
+    }
+
+    async fn on_prompt(&self, _prompt: OAuthPrompt) -> anyhow::Result<String> {
+        {
+            let mut waiting = self._waiting_for_prompt.lock().unwrap();
+            *waiting = true;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut res = self.prompt_result.lock().unwrap();
+            if let Some(val) = res.take() {
+                let mut waiting = self._waiting_for_prompt.lock().unwrap();
+                *waiting = false;
+                return Ok(val);
+            }
+        }
+    }
+
+    fn on_progress(&self, message: &str) {
+        let mut lock = self._progress.lock().unwrap();
+        *lock = message.to_string();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main TUI loop
 // ---------------------------------------------------------------------------
 
@@ -66,7 +114,7 @@ pub async fn run_config_tui() -> anyhow::Result<()> {
     group_state.select(Some(0));
     let mut sub_state = ListState::default();
 
-    let result = run_tui_loop(&mut terminal, &config, &groups, &mut screen, &mut group_state, &mut sub_state).await;
+    let result = run_tui_loop(&mut terminal, config, &groups, &mut screen, &mut group_state, &mut sub_state).await;
 
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
@@ -76,14 +124,21 @@ pub async fn run_config_tui() -> anyhow::Result<()> {
 
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    config: &ConfigManager,
+    config: ConfigManager,
     groups: &[(String, Vec<ProviderAuthInfo>)],
     screen: &mut Screen,
     group_state: &mut ListState,
     sub_state: &mut ListState,
 ) -> anyhow::Result<()> {
+    let oauth_callbacks = Arc::new(TuiOAuthCallbacks {
+        auth_info: Arc::new(Mutex::new(None)),
+        prompt_result: Arc::new(Mutex::new(None)),
+        _waiting_for_prompt: Arc::new(Mutex::new(false)),
+        _progress: Arc::new(Mutex::new(String::new())),
+    });
+
     loop {
-        terminal.draw(|f| draw(f, config, groups, screen, group_state, sub_state))?;
+        terminal.draw(|f| draw(f, &config, groups, screen, group_state, sub_state))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -111,7 +166,7 @@ async fn run_tui_loop(
                                         let (_, providers) = &groups[idx];
                                         if providers.len() == 1 {
                                             let prov = &providers[0];
-                                            handle_provider_select(config, prov, screen).await?;
+                                            handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
                                         } else {
                                             sub_state.select(Some(0));
                                             *screen = Screen::SubProviders(idx);
@@ -142,7 +197,7 @@ async fn run_tui_loop(
                                 if let Some(idx) = sub_state.selected() {
                                     if idx < providers.len() {
                                         let prov = &providers[idx];
-                                        handle_provider_select(config, prov, screen).await?;
+                                        handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
                                     }
                                 }
                             }
@@ -162,51 +217,29 @@ async fn run_tui_loop(
                             }
                             KeyCode::Enter => {
                                 if !state.input.is_empty() {
-                                    let provider_id = state.provider_id.clone();
-                                    let input = state.input.clone();
-
-                                    // Save credential
                                     if state.is_oauth {
-                                        // For Anthropic OAuth, input is code#state
-                                        // For now, store as api key (the OAuth flow will be enhanced)
-                                        let cred = Credential::ApiKey(ApiKeyCredential {
-                                            key: input,
-                                        });
-                                        config.set_credential(&provider_id, cred)?;
-                                    } else if state.hint.contains("setup-token") {
-                                        let cred = Credential::SetupToken(SetupTokenCredential {
-                                            token: input,
-                                        });
-                                        config.set_credential(&provider_id, cred)?;
+                                        let mut res = oauth_callbacks.prompt_result.lock().unwrap();
+                                        *res = Some(state.input.clone());
+                                        state.input.clear();
+                                        state.hint = "Processing...".into();
                                     } else {
-                                        let cred = Credential::ApiKey(ApiKeyCredential {
-                                            key: input,
-                                        });
-                                        config.set_credential(&provider_id, cred)?;
+                                        let provider_id = state.provider_id.clone();
+                                        let input = state.input.clone();
+                                        let is_setup = state.hint.contains("setup-token");
+
+                                        if is_setup {
+                                            let cred = Credential::SetupToken(SetupTokenCredential {
+                                                token: input,
+                                            });
+                                            config.set_credential(&provider_id, cred)?;
+                                        } else {
+                                            let cred = Credential::ApiKey(ApiKeyCredential {
+                                                key: input,
+                                            });
+                                            config.set_credential(&provider_id, cred)?;
+                                        }
+                                        enter_model_selection(&config, &provider_id, screen).await?;
                                     }
-
-                                    // Move to model selection
-                                    let models = get_provider_models(&provider_id);
-                                    let enabled = config.get_enabled_models().unwrap_or_default();
-                                    let model_items: Vec<(String, bool)> = models
-                                        .into_iter()
-                                        .map(|m| {
-                                            let full_id = format!("{}/{}", provider_id, m);
-                                            let selected = enabled.contains(&full_id);
-                                            (full_id, selected)
-                                        })
-                                        .collect();
-
-                                    let mut ls = ListState::default();
-                                    if !model_items.is_empty() {
-                                        ls.select(Some(0));
-                                    }
-
-                                    *screen = Screen::ModelSelect(ModelSelectState {
-                                        provider_id,
-                                        models: model_items,
-                                        list_state: ls,
-                                    });
                                 }
                             }
                             _ => {}
@@ -215,22 +248,7 @@ async fn run_tui_loop(
                     Screen::ModelSelect(state) => {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('q') => {
-                                // Save selected models
-                                let selected: Vec<String> = state
-                                    .models
-                                    .iter()
-                                    .filter(|(_, s)| *s)
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-
-                                // Remove old models for this provider, add new ones
-                                let mut all_enabled = config.get_enabled_models().unwrap_or_default();
-                                all_enabled.retain(|m| {
-                                    !m.starts_with(&format!("{}/", state.provider_id))
-                                });
-                                all_enabled.extend(selected);
-                                config.set_enabled_models(all_enabled)?;
-
+                                save_models(&config, state)?;
                                 *screen = Screen::ProviderGroups;
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -251,28 +269,13 @@ async fn run_tui_loop(
                                 }
                             }
                             KeyCode::Char('a') => {
-                                // Toggle all
                                 let all_selected = state.models.iter().all(|(_, s)| *s);
                                 for item in &mut state.models {
                                     item.1 = !all_selected;
                                 }
                             }
                             KeyCode::Enter => {
-                                // Confirm and save
-                                let selected: Vec<String> = state
-                                    .models
-                                    .iter()
-                                    .filter(|(_, s)| *s)
-                                    .map(|(id, _)| id.clone())
-                                    .collect();
-
-                                let mut all_enabled = config.get_enabled_models().unwrap_or_default();
-                                all_enabled.retain(|m| {
-                                    !m.starts_with(&format!("{}/", state.provider_id))
-                                });
-                                all_enabled.extend(selected);
-                                config.set_enabled_models(all_enabled)?;
-
+                                save_models(&config, state)?;
                                 *screen = Screen::ProviderGroups;
                             }
                             _ => {}
@@ -281,116 +284,64 @@ async fn run_tui_loop(
                 }
             }
         }
+
+        let mut next_provider_id = None;
+        if let Screen::AuthInput(state) = screen {
+            if state.is_oauth {
+                if config.has_credential(&state.provider_id).unwrap_or(false) {
+                    next_provider_id = Some(state.provider_id.clone());
+                } else {
+                    let info = oauth_callbacks.auth_info.lock().unwrap();
+                    if let Some(info) = &*info {
+                        state.oauth_url = Some(info.url.clone());
+                        if let Some(instr) = &info.instructions {
+                            state.hint = instr.clone();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(pid) = next_provider_id {
+            enter_model_selection(&config, &pid, screen).await?;
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Handle provider selection
-// ---------------------------------------------------------------------------
-
 async fn handle_provider_select(
-    config: &ConfigManager,
+    config: ConfigManager,
     prov: &ProviderAuthInfo,
     screen: &mut Screen,
+    callbacks: Arc<TuiOAuthCallbacks>,
 ) -> anyhow::Result<()> {
-    let provider_id = &prov.provider_id;
+    let provider_id = prov.provider_id.clone();
 
-    // Check if already configured
-    let has_cred = config.has_credential(provider_id).unwrap_or(false);
-
-    if has_cred {
-        // Skip auth, go directly to model selection
-        let models = get_provider_models(provider_id);
-        let enabled = config.get_enabled_models().unwrap_or_default();
-        let model_items: Vec<(String, bool)> = models
-            .into_iter()
-            .map(|m| {
-                let full_id = format!("{}/{}", provider_id, m);
-                let selected = enabled.contains(&full_id);
-                (full_id, selected)
-            })
-            .collect();
-
-        let mut ls = ListState::default();
-        if !model_items.is_empty() {
-            ls.select(Some(0));
-        }
-
-        *screen = Screen::ModelSelect(ModelSelectState {
-            provider_id: provider_id.clone(),
-            models: model_items,
-            list_state: ls,
-        });
-        return Ok(());
+    if config.has_credential(&provider_id).unwrap_or(false) {
+        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
-    // Try sniffing
-    if let Some(cred) = ai::auth::sniff::sniff_external_credential(provider_id) {
-        config.set_credential(provider_id, cred)?;
-        let models = get_provider_models(provider_id);
-        let enabled = config.get_enabled_models().unwrap_or_default();
-        let model_items: Vec<(String, bool)> = models
-            .into_iter()
-            .map(|m| {
-                let full_id = format!("{}/{}", provider_id, m);
-                let selected = enabled.contains(&full_id);
-                (full_id, selected)
-            })
-            .collect();
-
-        let mut ls = ListState::default();
-        if !model_items.is_empty() {
-            ls.select(Some(0));
-        }
-
-        *screen = Screen::ModelSelect(ModelSelectState {
-            provider_id: provider_id.clone(),
-            models: model_items,
-            list_state: ls,
-        });
-        return Ok(());
+    if let Some(cred) = auth::sniff::sniff_external_credential(&provider_id) {
+        config.set_credential(&provider_id, cred)?;
+        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
-    if let Some(key) = ai::auth::sniff::env_api_key(provider_id) {
+    if let Some(key) = auth::sniff::env_api_key(&provider_id) {
         let cred = Credential::ApiKey(ApiKeyCredential { key });
-        config.set_credential(provider_id, cred)?;
-        let models = get_provider_models(provider_id);
-        let enabled = config.get_enabled_models().unwrap_or_default();
-        let model_items: Vec<(String, bool)> = models
-            .into_iter()
-            .map(|m| {
-                let full_id = format!("{}/{}", provider_id, m);
-                let selected = enabled.contains(&full_id);
-                (full_id, selected)
-            })
-            .collect();
-
-        let mut ls = ListState::default();
-        if !model_items.is_empty() {
-            ls.select(Some(0));
-        }
-
-        *screen = Screen::ModelSelect(ModelSelectState {
-            provider_id: provider_id.clone(),
-            models: model_items,
-            list_state: ls,
-        });
-        return Ok(());
+        config.set_credential(&provider_id, cred)?;
+        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
-    // Need auth - determine method
     let method = prov.auth_methods.first().cloned().unwrap_or(AuthMethod::ApiKey {
         env_var: None,
         hint: None,
     });
 
-    match &method {
+    match method {
         AuthMethod::ApiKey { hint, .. } => {
             *screen = Screen::AuthInput(AuthInputState {
                 provider_id: provider_id.clone(),
                 label: format!("Enter API key for {}", prov.label),
                 input: String::new(),
-                hint: hint.clone().unwrap_or_default(),
+                hint: hint.unwrap_or_default(),
                 is_oauth: false,
                 oauth_url: None,
             });
@@ -400,36 +351,72 @@ async fn handle_provider_select(
                 provider_id: provider_id.clone(),
                 label: format!("Enter setup-token for {}", prov.label),
                 input: String::new(),
-                hint: hint.clone().unwrap_or_else(|| "Run `claude setup-token` to generate".into()),
+                hint: hint.unwrap_or_else(|| "Run `claude setup-token` to generate".into()),
                 is_oauth: false,
                 oauth_url: None,
             });
         }
         AuthMethod::OAuth { hint } => {
+            let pid = provider_id.clone();
+            let config_mgr = config.clone();
+            tokio::spawn(async move {
+                let oauth_provider: Box<dyn OAuthProvider + Send> = match pid.as_str() {
+                    "anthropic" => Box::new(AnthropicOAuthProvider),
+                    "gemini-cli" => Box::new(GeminiCliOAuthProvider),
+                    "antigravity" => Box::new(AntigravityOAuthProvider),
+                    _ => return,
+                };
+                if let Ok(creds) = oauth_provider.login(&*callbacks).await {
+                    let _ = config_mgr.set_credential(&pid, Credential::OAuth(ai::auth::OAuthCredential {
+                        refresh: creds.refresh,
+                        access: creds.access,
+                        expires: creds.expires,
+                        extra: creds.extra,
+                    }));
+                }
+            });
             *screen = Screen::AuthInput(AuthInputState {
                 provider_id: provider_id.clone(),
                 label: format!("OAuth for {}", prov.label),
                 input: String::new(),
-                hint: hint.clone().unwrap_or_else(|| "Paste the authorization response".into()),
+                hint: hint.unwrap_or_else(|| "Opening browser...".into()),
                 is_oauth: true,
-                oauth_url: None, // Will be generated by the OAuth flow
+                oauth_url: None,
             });
         }
     }
-
     Ok(())
 }
 
-fn get_provider_models(provider_id: &str) -> Vec<String> {
-    static_models_for_provider(provider_id)
+async fn enter_model_selection(config: &ConfigManager, provider_id: &str, screen: &mut Screen) -> anyhow::Result<()> {
+    let models = static_models_for_provider(provider_id).into_iter().map(|m| m.id).collect::<Vec<_>>();
+    let enabled = config.get_enabled_models().unwrap_or_default();
+    let model_items: Vec<(String, bool)> = models
         .into_iter()
-        .map(|m| m.id)
-        .collect()
+        .map(|m| {
+            let full_id = format!("{}/{}", provider_id, m);
+            let selected = enabled.contains(&full_id);
+            (full_id, selected)
+        })
+        .collect();
+    let mut ls = ListState::default();
+    if !model_items.is_empty() { ls.select(Some(0)); }
+    *screen = Screen::ModelSelect(ModelSelectState {
+        provider_id: provider_id.to_string(),
+        models: model_items,
+        list_state: ls,
+    });
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Drawing
-// ---------------------------------------------------------------------------
+fn save_models(config: &ConfigManager, state: &ModelSelectState) -> anyhow::Result<()> {
+    let selected: Vec<String> = state.models.iter().filter(|(_, s)| *s).map(|(id, _)| id.clone()).collect();
+    let mut all_enabled = config.get_enabled_models().unwrap_or_default();
+    all_enabled.retain(|m| !m.starts_with(&format!("{}/", state.provider_id)));
+    all_enabled.extend(selected);
+    config.set_enabled_models(all_enabled)?;
+    Ok(())
+}
 
 fn draw(
     f: &mut Frame,
@@ -440,114 +427,50 @@ fn draw(
     sub_state: &mut ListState,
 ) {
     let area = f.area();
-
     match screen {
         Screen::ProviderGroups => {
-            let items: Vec<ListItem> = groups
-                .iter()
-                .map(|(label, providers)| {
-                    let has_any_cred = providers.iter().any(|p| {
-                        config.has_credential(&p.provider_id).unwrap_or(false)
-                    });
-                    let marker = if has_any_cred { "●" } else { "○" };
-                    let color = if has_any_cred {
-                        Color::Green
-                    } else {
-                        Color::White
-                    };
-                    let hint = &providers[0].hint;
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!(" {} ", marker), Style::default().fg(color)),
-                        Span::raw(format!("{} - {}", label, hint)),
-                    ]))
-                })
-                .collect();
-
-            let list = List::new(items)
-                .block(Block::default().title(" Providers (↑↓ navigate, Enter select, q quit) ").borders(Borders::ALL))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
+            let items: Vec<ListItem> = groups.iter().map(|(label, providers)| {
+                let has_any_cred = providers.iter().any(|p| config.has_credential(&p.provider_id).unwrap_or(false));
+                let marker = if has_any_cred { "●" } else { "○" };
+                let color = if has_any_cred { Color::Green } else { Color::White };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", marker), Style::default().fg(color)),
+                    Span::raw(format!("{} - {}", label, providers[0].hint)),
+                ]))
+            }).collect();
+            let list = List::new(items).block(Block::default().title(" Providers (Enter select, q quit) ").borders(Borders::ALL)).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             f.render_stateful_widget(list, area, group_state);
         }
         Screen::SubProviders(group_idx) => {
             let (group_label, providers) = &groups[*group_idx];
-            let items: Vec<ListItem> = providers
-                .iter()
-                .map(|p| {
-                    let has_cred = config.has_credential(&p.provider_id).unwrap_or(false);
-                    let marker = if has_cred { "●" } else { "○" };
-                    let color = if has_cred {
-                        Color::Green
-                    } else {
-                        Color::White
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!(" {} ", marker), Style::default().fg(color)),
-                        Span::raw(format!("{} - {}", p.label, p.hint)),
-                    ]))
-                })
-                .collect();
-
-            let list = List::new(items)
-                .block(Block::default().title(format!(" {} (Esc back) ", group_label)).borders(Borders::ALL))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
+            let items: Vec<ListItem> = providers.iter().map(|p| {
+                let has_cred = config.has_credential(&p.provider_id).unwrap_or(false);
+                let marker = if has_cred { "●" } else { "○" };
+                let color = if has_cred { Color::Green } else { Color::White };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", marker), Style::default().fg(color)),
+                    Span::raw(format!("{} - {}", p.label, p.hint)),
+                ]))
+            }).collect();
+            let list = List::new(items).block(Block::default().title(format!(" {} (Esc back) ", group_label)).borders(Borders::ALL)).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             f.render_stateful_widget(list, area, sub_state);
         }
         Screen::AuthInput(state) => {
-            let chunks = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(1),
-            ])
-            .split(area);
-
-            let title = Paragraph::new(state.label.as_str())
-                .block(Block::default().borders(Borders::ALL));
-            f.render_widget(title, chunks[0]);
-
-            if !state.hint.is_empty() {
-                let hint = Paragraph::new(state.hint.as_str())
-                    .style(Style::default().fg(Color::DarkGray))
-                    .block(Block::default().borders(Borders::ALL).title(" Hint "));
-                f.render_widget(hint, chunks[1]);
-            }
-
+            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(1)]).split(area);
+            f.render_widget(Paragraph::new(state.label.as_str()).block(Block::default().borders(Borders::ALL)), chunks[0]);
+            f.render_widget(Paragraph::new(state.hint.as_str()).style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL).title(" Hint ")), chunks[1]);
+            let mut input_text = state.input.clone();
             if let Some(url) = &state.oauth_url {
-                let url_widget = Paragraph::new(url.as_str())
-                    .style(Style::default().fg(Color::Cyan))
-                    .block(Block::default().borders(Borders::ALL).title(" OAuth URL "));
-                f.render_widget(url_widget, chunks[2]);
+                input_text = format!("URL: {}\n\nInput: {}", url, input_text);
             }
-
-            let masked: String = if state.input.len() > 4 {
-                format!("{}****", &state.input[..4])
-            } else {
-                "*".repeat(state.input.len())
-            };
-            let input = Paragraph::new(masked)
-                .block(Block::default().borders(Borders::ALL).title(" Input (Enter to confirm, Esc to cancel) "));
-            f.render_widget(input, chunks[3]);
+            f.render_widget(Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).title(" Input (Enter confirm, Esc cancel) ")), chunks[2]);
         }
         Screen::ModelSelect(state) => {
-            let items: Vec<ListItem> = state
-                .models
-                .iter()
-                .map(|(id, selected)| {
-                    let marker = if *selected { "[x]" } else { "[ ]" };
-                    ListItem::new(format!(" {} {}", marker, id))
-                })
-                .collect();
-
-            let list = List::new(items)
-                .block(
-                    Block::default()
-                        .title(" Models (Space toggle, a select all, Enter confirm) ")
-                        .borders(Borders::ALL),
-                )
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
+            let items: Vec<ListItem> = state.models.iter().map(|(id, selected)| {
+                let marker = if *selected { "[x]" } else { "[ ]" };
+                ListItem::new(format!(" {} {}", marker, id))
+            }).collect();
+            let list = List::new(items).block(Block::default().title(" Models (Space toggle, a all, Enter confirm) ").borders(Borders::ALL)).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             let mut ls = state.list_state.clone();
             f.render_stateful_widget(list, area, &mut ls);
         }
