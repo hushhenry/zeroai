@@ -168,6 +168,8 @@ impl ConfigManager {
                         "anthropic" => Box::new(crate::oauth::anthropic::AnthropicOAuthProvider),
                         "gemini-cli" => Box::new(crate::oauth::google_gemini_cli::GeminiCliOAuthProvider),
                         "antigravity" => Box::new(crate::oauth::google_antigravity::AntigravityOAuthProvider),
+                        "openai-codex" => Box::new(crate::oauth::openai_codex::OpenAiCodexOAuthProvider),
+                        "github-copilot" => Box::new(crate::oauth::github_copilot::GitHubCopilotOAuthProvider),
                         _ => return Ok(cred.api_key()), // Unknown provider, can't refresh
                     };
 

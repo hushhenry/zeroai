@@ -100,10 +100,19 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
             provider_id: "openai".into(),
             label: "OpenAI API key".into(),
             group: "OpenAI".into(),
-            hint: "Codex OAuth + API key".into(),
+            hint: "Standard API key".into(),
             auth_methods: vec![AuthMethod::ApiKey {
                 env_var: Some("OPENAI_API_KEY".into()),
                 hint: None,
+            }],
+        },
+        ProviderAuthInfo {
+            provider_id: "openai-codex".into(),
+            label: "OpenAI Codex (ChatGPT OAuth)".into(),
+            group: "OpenAI".into(),
+            hint: "Uses ChatGPT Plus/Pro session".into(),
+            auth_methods: vec![AuthMethod::OAuth {
+                hint: Some("OAuth flow for ChatGPT session".into()),
             }],
         },
         // Anthropic Group
@@ -237,8 +246,7 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
             label: "GitHub Copilot (GitHub device login)".into(),
             group: "Copilot".into(),
             hint: "GitHub + local proxy".into(),
-            auth_methods: vec![AuthMethod::ApiKey {
-                env_var: Some("COPILOT_GITHUB_TOKEN".into()),
+            auth_methods: vec![AuthMethod::OAuth {
                 hint: Some("Uses GitHub device flow".into()),
             }],
         },

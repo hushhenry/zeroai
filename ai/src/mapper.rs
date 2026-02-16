@@ -37,6 +37,7 @@ impl ModelMapper {
         providers.insert("fireworks".into(), openai.clone());
         providers.insert("nebius".into(), openai.clone());
         providers.insert("openrouter".into(), openai.clone());
+        providers.insert("openai-codex".into(), openai.clone());
         providers.insert("minimax".into(), openai.clone());
         providers.insert("moonshot".into(), openai.clone());
         providers.insert("qianfan".into(), openai.clone());
