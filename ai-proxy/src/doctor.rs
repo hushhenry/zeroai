@@ -81,7 +81,7 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
         let api_key = config.resolve_api_key(provider)?;
 
         if api_key.is_none() {
-            println!("  {} - ❌ No credentials", full_id);
+            println!("  {} - No credentials", full_id);
             continue;
         }
 
@@ -94,7 +94,6 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
             model_def,
             api_key.as_deref().unwrap(),
             &tool,
-            true,
         )
         .await;
 
@@ -105,8 +104,10 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
                     println!("  Tool call:  ✅ Received");
                     if report.tool_result_ok {
                         println!("  Tool result: ✅ Processed");
+                    } else if let Some(err) = report.tool_result_error {
+                        println!("  Tool result: ❌ Failed: {}", err);
                     } else {
-                        println!("  Tool result: ⚠️  Not tested (single turn)");
+                        println!("  Tool result: ⚠️  Not triggered by model");
                     }
                 } else {
                     println!("  Tool call:  ℹ️  Not triggered");
@@ -114,26 +115,6 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
             }
             Err(e) => {
                 println!("  Stream:     ❌ {}", e);
-            }
-        }
-
-        // Test non-streaming (simpler, just check if we get a response)
-        let nonstream_result = check_model(
-            &mapper,
-            full_id,
-            model_def,
-            api_key.as_deref().unwrap(),
-            &tool,
-            false,
-        )
-        .await;
-
-        match nonstream_result {
-            Ok(report) => {
-                println!("  Non-stream: ✅ {} tokens, stop={:?}", report.total_tokens, report.stop_reason);
-            }
-            Err(e) => {
-                println!("  Non-stream: ❌ {}", e);
             }
         }
     }
@@ -148,6 +129,7 @@ struct CheckReport {
     stop_reason: String,
     tool_call_received: bool,
     tool_result_ok: bool,
+    tool_result_error: Option<String>,
 }
 
 async fn check_model(
@@ -156,7 +138,6 @@ async fn check_model(
     model_def: &ModelDef,
     api_key: &str,
     tool: &ToolDef,
-    _is_stream: bool,
 ) -> anyhow::Result<CheckReport> {
     let context = ChatContext {
         system_prompt: Some("You are a helpful assistant. When asked for the time, use the get_current_time tool.".into()),
@@ -176,17 +157,17 @@ async fn check_model(
         extra_headers: None,
     };
 
-    let stream = mapper.stream(full_id, model_def, &context, &options)?;
+    let mut stream = mapper.stream(full_id, model_def, &context, &options)?;
 
     let mut report = CheckReport {
         total_tokens: 0,
         stop_reason: "unknown".into(),
         tool_call_received: false,
         tool_result_ok: false,
+        tool_result_error: None,
     };
 
     let mut events: Vec<StreamEvent> = Vec::new();
-    let mut stream = stream;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -194,6 +175,8 @@ async fn check_model(
             Err(e) => return Err(anyhow::anyhow!("{}", e)),
         }
     }
+
+    let mut done_msg = None;
 
     for evt in &events {
         match evt {
@@ -204,6 +187,7 @@ async fn check_model(
                     .content
                     .iter()
                     .any(|b| matches!(b, ContentBlock::ToolCall(_)));
+                done_msg = Some(message.clone());
             }
             StreamEvent::Error { message } => {
                 return Err(anyhow::anyhow!(
@@ -228,14 +212,6 @@ async fn check_model(
 
     // If we got a tool call, do a follow-up with the tool result
     if report.tool_call_received {
-        let done_msg = events.iter().find_map(|e| {
-            if let StreamEvent::Done { message } = e {
-                Some(message.clone())
-            } else {
-                None
-            }
-        });
-
         if let Some(msg) = done_msg {
             let tool_call = msg.content.iter().find_map(|b| {
                 if let ContentBlock::ToolCall(tc) = b {
@@ -263,13 +239,29 @@ async fn check_model(
                     tools: vec![tool.clone()],
                 };
 
-                let stream2 = mapper.stream(full_id, model_def, &follow_up, &options)?;
-                let mut stream2 = stream2;
-
-                while let Some(event) = stream2.next().await {
-                    if let Ok(StreamEvent::Done { .. }) = event {
-                        report.tool_result_ok = true;
-                        break;
+                match mapper.stream(full_id, model_def, &follow_up, &options) {
+                    Ok(mut s2) => {
+                        while let Some(event) = s2.next().await {
+                            match event {
+                                Ok(StreamEvent::Done { .. }) => {
+                                    report.tool_result_ok = true;
+                                    break;
+                                }
+                                Ok(StreamEvent::Error { message }) => {
+                                    let err_text = message.content.iter().filter_map(|b| if let ContentBlock::Text(t) = b { Some(t.text.clone()) } else { None }).collect::<Vec<_>>().join("");
+                                    report.tool_result_error = Some(format!("Model error in follow-up: {}", err_text));
+                                    break;
+                                }
+                                Err(e) => {
+                                    report.tool_result_error = Some(format!("Stream error in follow-up: {}", e));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        report.tool_result_error = Some(format!("Follow-up start error: {}", e));
                     }
                 }
             }
