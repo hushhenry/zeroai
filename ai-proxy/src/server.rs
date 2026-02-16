@@ -91,9 +91,9 @@ impl AppState {
 pub async fn run_server(host: &str, port: u16) -> anyhow::Result<()> {
     let state = Arc::new(AppState::new().await?);
 
-    // Start background auto-refresh service (check every 15 minutes)
+    // Start background auto-refresh service (check every 15 minutes, with 20 minute buffer)
     let refresh_config = state.config.clone();
-    refresh_config.start_auto_refresh_service(15 * 60);
+    refresh_config.start_auto_refresh_service(15 * 60, 20 * 60);
 
     let app = Router::new()
         .route("/v1/models", get(list_models))

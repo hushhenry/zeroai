@@ -155,15 +155,15 @@ impl ConfigManager {
     }
 
     /// Get the API key for a provider. Checks config, then env vars, then sniffed files.
-    /// Automatically refreshes OAuth tokens if expired.
-    pub async fn resolve_api_key(&self, provider_id: &str) -> anyhow::Result<Option<String>> {
+    /// Automatically refreshes OAuth tokens if expired or near expiry.
+    pub async fn resolve_api_key_with_buffer(&self, provider_id: &str, buffer_secs: u64) -> anyhow::Result<Option<String>> {
         // 1. Check config
         if let Some(mut cred) = self.get_credential(provider_id)? {
             // Handle OAuth refresh if needed
             if let super::Credential::OAuth(ref mut oauth) = cred {
                 let now = chrono::Utc::now().timestamp_millis();
-                // If expired or expiring in less than 5 minutes
-                if now + 5 * 60 * 1000 >= oauth.expires {
+                // If expired or expiring within buffer
+                if now + (buffer_secs as i64 * 1000) >= oauth.expires {
                     let oauth_provider: Box<dyn crate::oauth::OAuthProvider> = match provider_id {
                         "anthropic" => Box::new(crate::oauth::anthropic::AnthropicOAuthProvider),
                         "gemini-cli" => Box::new(crate::oauth::google_gemini_cli::GeminiCliOAuthProvider),
@@ -215,26 +215,31 @@ impl ConfigManager {
         Ok(None)
     }
 
+    /// Resolve API key with a default buffer of 5 minutes.
+    pub async fn resolve_api_key(&self, provider_id: &str) -> anyhow::Result<Option<String>> {
+        self.resolve_api_key_with_buffer(provider_id, 5 * 60).await
+    }
+
     /// Refresh all OAuth credentials in the config if they are near expiry.
-    pub async fn refresh_all_credentials(&self) -> anyhow::Result<()> {
+    pub async fn refresh_all_credentials(&self, buffer_secs: u64) -> anyhow::Result<()> {
         let providers = self.list_providers_with_credentials()?;
         for pid in providers {
             // resolve_api_key handles the logic of checking expiry and refreshing
-            let _ = self.resolve_api_key(&pid).await?;
+            let _ = self.resolve_api_key_with_buffer(&pid, buffer_secs).await?;
         }
         Ok(())
     }
 
     /// Start a background task that periodically refreshes all OAuth credentials.
-    /// Returns a JoinHandle so the caller can manage the task.
-    pub fn start_auto_refresh_service(self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+    /// buffer_secs should ideally be >= interval_secs to avoid missing tokens.
+    pub fn start_auto_refresh_service(self, interval_secs: u64, buffer_secs: u64) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
                 interval.tick().await;
-                tracing::debug!("Running auto-refresh service for OAuth credentials...");
-                if let Err(e) = self.refresh_all_credentials().await {
-                    tracing::error!("Auto-refresh service encountered an error: {}", e);
+                tracing::debug!("Running auto-refresh service (interval={}s, buffer={}s)...", interval_secs, buffer_secs);
+                if let Err(e) = self.refresh_all_credentials(buffer_secs).await {
+                    tracing::error!("Auto-refresh service error: {}", e);
                 }
             }
         })
