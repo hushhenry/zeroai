@@ -130,6 +130,81 @@ pub fn resolve_credential(provider_name: &str, override_key: Option<&str>) -> Op
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_credential_override_takes_priority() {
+        // Override should win even if we don't set any env (unknown provider)
+        let got = resolve_credential("unknown-provider-no-env", Some("override-key"));
+        assert_eq!(got.as_deref(), Some("override-key"));
+    }
+
+    #[test]
+    fn resolve_credential_empty_whitespace_override_ignored() {
+        // Whitespace-only override should be ignored
+        let got = resolve_credential("unknown-provider-xyz", Some("   "));
+        assert_eq!(got, None);
+        let got = resolve_credential("unknown-provider-xyz", Some(""));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_credential_returns_none_when_nothing_available() {
+        let got = resolve_credential("unknown-provider-with-no-env-set", None);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_credential_override_trimmed() {
+        let got = resolve_credential("any", Some("  trimmed-key  "));
+        assert_eq!(got.as_deref(), Some("trimmed-key"));
+    }
+
+    #[test]
+    fn resolve_credential_falls_back_to_provider_env() {
+        let var = "OPENROUTER_API_KEY";
+        let saved = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "env-key-value") };
+        let got = resolve_credential("openrouter", None);
+        if let Some(ref s) = saved {
+            unsafe { std::env::set_var(var, s) };
+        } else {
+            unsafe { std::env::remove_var(var) };
+        }
+        assert_eq!(got.as_deref(), Some("env-key-value"));
+    }
+
+    #[test]
+    fn resolve_credential_falls_back_to_generic_zeroai_api_key() {
+        let var = "ZEROAI_API_KEY";
+        let saved = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "generic-zeroai-key") };
+        let got = resolve_credential("unknown-provider-for-generic", None);
+        if let Some(ref s) = saved {
+            unsafe { std::env::set_var(var, s) };
+        } else {
+            unsafe { std::env::remove_var(var) };
+        }
+        assert_eq!(got.as_deref(), Some("generic-zeroai-key"));
+    }
+
+    #[test]
+    fn resolve_credential_falls_back_to_api_key() {
+        let var = "API_KEY";
+        let saved = std::env::var(var).ok();
+        unsafe { std::env::set_var(var, "generic-api-key") };
+        let got = resolve_credential("another-unknown-provider", None);
+        if let Some(ref s) = saved {
+            unsafe { std::env::set_var(var, s) };
+        } else {
+            unsafe { std::env::remove_var(var) };
+        }
+        assert_eq!(got.as_deref(), Some("generic-api-key"));
+    }
+}
+
 /// Try to get an API key from environment variables for the given provider.
 pub fn env_api_key(provider_id: &str) -> Option<String> {
     resolve_credential(provider_id, None)

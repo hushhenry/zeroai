@@ -123,3 +123,123 @@ pub fn retry_stream(
     };
     Box::pin(stream)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RetryConfig;
+
+    fn http_err(status: u16) -> ProviderError {
+        ProviderError::Http {
+            status,
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn is_non_retryable_4xx_except_429_408() {
+        assert!(is_non_retryable(&http_err(400)));
+        assert!(is_non_retryable(&http_err(401)));
+        assert!(is_non_retryable(&http_err(403)));
+        assert!(is_non_retryable(&http_err(404)));
+        assert!(!is_non_retryable(&http_err(429)));
+        assert!(!is_non_retryable(&http_err(408)));
+    }
+
+    #[test]
+    fn is_non_retryable_5xx_and_other() {
+        assert!(!is_non_retryable(&http_err(500)));
+        assert!(!is_non_retryable(&http_err(502)));
+        assert!(!is_non_retryable(&ProviderError::Other("timeout".into())));
+        assert!(!is_non_retryable(&ProviderError::Other("connection reset".into())));
+    }
+
+    #[test]
+    fn is_non_retryable_auth_required() {
+        assert!(is_non_retryable(&ProviderError::AuthRequired("key required".into())));
+    }
+
+    #[test]
+    fn is_non_retryable_parses_message_for_status() {
+        assert!(is_non_retryable(&ProviderError::Other("400 Bad Request".into())));
+        assert!(is_non_retryable(&ProviderError::Other("401 Unauthorized".into())));
+        assert!(!is_non_retryable(&ProviderError::Other("429 Too Many Requests".into())));
+    }
+
+    #[test]
+    fn is_rate_limited_429() {
+        assert!(is_rate_limited(&http_err(429)));
+        assert!(is_rate_limited(&ProviderError::RateLimited { retry_after_ms: None }));
+    }
+
+    #[test]
+    fn is_rate_limited_others_false() {
+        assert!(!is_rate_limited(&http_err(400)));
+        assert!(!is_rate_limited(&http_err(500)));
+        assert!(!is_rate_limited(&ProviderError::Other("timeout".into())));
+    }
+
+    #[test]
+    fn is_rate_limited_message_contains_429_and_keyword() {
+        assert!(is_rate_limited(&ProviderError::Other("429 Too Many Requests".into())));
+        assert!(is_rate_limited(&ProviderError::Other("HTTP 429 rate limit exceeded".into())));
+    }
+
+    #[test]
+    fn parse_retry_after_ms_integer() {
+        let err = ProviderError::Http {
+            status: 429,
+            body: "429 Too Many Requests, Retry-After: 5".into(),
+        };
+        assert_eq!(parse_retry_after_ms(&err), Some(5000));
+    }
+
+    #[test]
+    fn parse_retry_after_ms_float() {
+        let err = ProviderError::Other("Rate limited. retry_after: 2.5 seconds".into());
+        assert_eq!(parse_retry_after_ms(&err), Some(2500));
+    }
+
+    #[test]
+    fn parse_retry_after_ms_missing() {
+        let err = ProviderError::Other("500 Internal Server Error".into());
+        assert_eq!(parse_retry_after_ms(&err), None);
+    }
+
+    #[test]
+    fn parse_retry_after_ms_from_rate_limited_variant() {
+        let err = ProviderError::RateLimited {
+            retry_after_ms: Some(3000),
+        };
+        assert_eq!(parse_retry_after_ms(&err), Some(3000));
+    }
+
+    #[test]
+    fn compute_backoff_uses_retry_after() {
+        let config = RetryConfig::default();
+        let err = ProviderError::Http {
+            status: 429,
+            body: "429 Retry-After: 3".into(),
+        };
+        assert_eq!(compute_backoff(&config, 500, &err), 3000);
+    }
+
+    #[test]
+    fn compute_backoff_caps_at_30s() {
+        let config = RetryConfig::default();
+        let err = ProviderError::Http {
+            status: 429,
+            body: "429 Retry-After: 120".into(),
+        };
+        assert_eq!(compute_backoff(&config, 500, &err), 30_000);
+    }
+
+    #[test]
+    fn compute_backoff_falls_back_to_base() {
+        let config = RetryConfig::default();
+        let err = ProviderError::Other("500 Server Error".into());
+        // When no Retry-After, uses base (base_ms clamped by config.base_backoff_ms minimum)
+        assert_eq!(compute_backoff(&config, 500, &err), 500);
+        assert_eq!(compute_backoff(&config, 2000, &err), 2000);
+    }
+}

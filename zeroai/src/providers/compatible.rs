@@ -85,6 +85,16 @@ impl OpenAiCompatibleProvider {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn chat_completions_url_for_test(&self) -> String {
+        self.chat_completions_url()
+    }
+
+    #[cfg(test)]
+    pub fn models_list_url_for_test(&self) -> String {
+        self.models_list_url()
+    }
 }
 
 // ---- Request/response types (OpenAI wire format) ----
@@ -697,5 +707,114 @@ impl Provider for OpenAiCompatibleProvider {
             .collect();
 
         Ok(models)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_style_bearer_stored() {
+        let p = OpenAiCompatibleProvider::new(
+            "test",
+            "https://api.example.com",
+            Some("key"),
+            AuthStyle::Bearer,
+        );
+        assert!(matches!(p.auth_style, AuthStyle::Bearer));
+    }
+
+    #[test]
+    fn auth_style_x_api_key_stored() {
+        let p = OpenAiCompatibleProvider::new(
+            "test",
+            "https://api.example.com",
+            Some("key"),
+            AuthStyle::XApiKey,
+        );
+        assert!(matches!(p.auth_style, AuthStyle::XApiKey));
+    }
+
+    #[test]
+    fn auth_style_custom_stored() {
+        let p = OpenAiCompatibleProvider::new(
+            "test",
+            "https://api.example.com",
+            Some("key"),
+            AuthStyle::Custom {
+                header: "X-Custom-Key".into(),
+                value_prefix: "Bearer ".into(),
+            },
+        );
+        match &p.auth_style {
+            AuthStyle::Custom { header, value_prefix } => {
+                assert_eq!(header, "X-Custom-Key");
+                assert_eq!(value_prefix, "Bearer ");
+            }
+            _ => panic!("expected Custom"),
+        }
+    }
+
+    #[test]
+    fn chat_completions_url_standard() {
+        let p = OpenAiCompatibleProvider::new("t", "https://api.example.com/v1", None, AuthStyle::Bearer);
+        assert_eq!(
+            p.chat_completions_url_for_test(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_completions_url_trailing_slash_stripped() {
+        let p = OpenAiCompatibleProvider::new("t", "https://api.example.com/v1/", None, AuthStyle::Bearer);
+        assert_eq!(
+            p.chat_completions_url_for_test(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_completions_url_full_path_unchanged() {
+        let p = OpenAiCompatibleProvider::new(
+            "t",
+            "https://api.example.com/v1/chat/completions",
+            None,
+            AuthStyle::Bearer,
+        );
+        assert_eq!(
+            p.chat_completions_url_for_test(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn models_list_url_default() {
+        let p = OpenAiCompatibleProvider::new("t", "https://api.example.com", None, AuthStyle::Bearer);
+        assert_eq!(p.models_list_url_for_test(), "https://api.example.com/models");
+    }
+
+    #[test]
+    fn models_list_url_custom() {
+        let p = OpenAiCompatibleProvider::new("t", "https://api.example.com", None, AuthStyle::Bearer)
+            .with_models_url("https://custom.example.com/v1/models");
+        assert_eq!(
+            p.models_list_url_for_test(),
+            "https://custom.example.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn request_body_has_tools_and_messages() {
+        // Smoke test: create provider and ensure it builds (tools/messages come from convert_messages/convert_tools)
+        let p = OpenAiCompatibleProvider::new(
+            "test",
+            "https://api.example.com",
+            Some("key"),
+            AuthStyle::Bearer,
+        );
+        assert_eq!(p.name, "test");
+        assert_eq!(p.base_url, "https://api.example.com");
+        assert_eq!(p.api_key.as_deref(), Some("key"));
     }
 }

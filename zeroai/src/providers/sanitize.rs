@@ -75,3 +75,63 @@ pub fn api_error_body(status: u16, body: &str) -> super::ProviderError {
         body: sanitize_api_error(body),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrub_secret_patterns_redacts_sk() {
+        let input = "request failed: sk-1234567890abcdef";
+        let out = scrub_secret_patterns(input);
+        assert!(!out.contains("sk-1234567890abcdef"));
+        assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn scrub_secret_patterns_redacts_multiple_prefixes() {
+        let input = "keys sk-abcdef xoxb-12345 xoxp-67890";
+        let out = scrub_secret_patterns(input);
+        assert!(!out.contains("sk-abcdef"));
+        assert!(!out.contains("xoxb-12345"));
+        assert!(!out.contains("xoxp-67890"));
+        assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn scrub_secret_patterns_keeps_bare_prefix() {
+        let input = "only prefix sk- present";
+        let out = scrub_secret_patterns(input);
+        assert!(out.contains("sk-"));
+        assert!(!out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn sanitize_api_error_truncates_to_200_chars() {
+        let long = "a".repeat(400);
+        let result = sanitize_api_error(&long);
+        assert!(result.len() <= 203, "len={}", result.len());
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn sanitize_api_error_empty_string() {
+        let result = sanitize_api_error("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn sanitize_api_error_no_secrets_unchanged() {
+        let input = "simple upstream timeout";
+        let result = sanitize_api_error(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn sanitize_api_error_redacts_then_truncates() {
+        let input = format!("{} sk-abcdef123456 {}", "a".repeat(190), "b".repeat(190));
+        let result = sanitize_api_error(&input);
+        assert!(!result.contains("sk-abcdef123456"));
+        assert!(result.len() <= 203);
+    }
+}
