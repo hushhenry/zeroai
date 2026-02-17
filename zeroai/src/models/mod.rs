@@ -1,5 +1,5 @@
 pub mod fetch;
 pub mod static_models;
 
-pub use fetch::{fetch_models_for_provider, is_custom_provider};
+pub use fetch::{fetch_models_for_provider, is_custom_provider, FetchError};
 pub use static_models::*;

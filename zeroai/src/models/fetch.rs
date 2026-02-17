@@ -2,9 +2,37 @@
 
 use crate::models::static_models::static_models_for_provider;
 use crate::types::*;
-use anyhow::Context;
 use reqwest::Client;
 use serde::Deserialize;
+use std::fmt;
+
+/// Error from fetching models list, with optional HTTP status for auth/API errors.
+#[derive(Debug, Clone)]
+pub struct FetchError {
+    /// HTTP status code if the failure was an HTTP error (e.g. 401, 403, 404).
+    pub status: Option<u16>,
+    /// Human-readable message.
+    pub message: String,
+}
+
+impl fmt::Display for FetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(s) = self.status {
+            write!(f, "{} {}", s, self.message)
+        } else {
+            write!(f, "{}", self.message)
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+impl FetchError {
+    /// True if this error is likely an auth/credential problem (401, 403, or 404).
+    pub fn is_auth_error(&self) -> bool {
+        self.status.map(|s| s == 401 || s == 403 || s == 404).unwrap_or(false)
+    }
+}
 
 /// OpenAI-compatible models list response.
 #[derive(Debug, Deserialize)]
@@ -27,11 +55,12 @@ pub fn is_custom_provider(provider: &str) -> bool {
 
 /// Fetch models for a provider. For static providers uses the static list; for custom
 /// (name contains "custom:") fetches via HTTP GET from models_url or {base_url}/v1/models.
+/// Returns a structured FetchError with status code on HTTP errors so callers can detect auth failures.
 pub async fn fetch_models_for_provider(
     provider: &str,
     api_key: Option<&str>,
     models_url: Option<&str>,
-) -> anyhow::Result<Vec<ModelDef>> {
+) -> Result<Vec<ModelDef>, FetchError> {
     if !is_custom_provider(provider) {
         return Ok(static_models_for_provider(provider));
     }
@@ -56,19 +85,35 @@ pub async fn fetch_models_for_provider(
         req = req.header("Authorization", format!("Bearer {}", key));
     }
 
-    let resp = req.send().await.context("Failed to fetch models list")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let resp = req.send().await.map_err(|e| FetchError {
+        status: None,
+        message: format!("Failed to fetch models list: {}", e),
+    })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let code = status.as_u16();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "Models list request failed: {} {}",
-            status,
-            if body.len() > 200 { format!("{}...", &body[..200]) } else { body }
-        );
+        let msg = if body.len() > 200 {
+            format!("{}...", &body[..200])
+        } else {
+            body
+        };
+        return Err(FetchError {
+            status: Some(code),
+            message: msg,
+        });
     }
 
-    let body = resp.text().await.context("Failed to read models response body")?;
-    let parsed: OpenAIModelsResponse = serde_json::from_str(&body).context("Invalid models list JSON")?;
+    let body = resp.text().await.map_err(|e| FetchError {
+        status: None,
+        message: format!("Failed to read response body: {}", e),
+    })?;
+
+    let parsed: OpenAIModelsResponse = serde_json::from_str(&body).map_err(|e| FetchError {
+        status: None,
+        message: format!("Invalid models list JSON: {}", e),
+    })?;
 
     let models = parsed
         .data
@@ -131,5 +176,14 @@ mod tests {
         let base_url = provider.strip_prefix("custom:").unwrap().trim().trim_end_matches('/');
         let url: String = format!("{}/v1/models", base_url);
         assert_eq!(url, "https://api.example.com/v1/models");
+    }
+
+    #[test]
+    fn fetch_error_is_auth_error() {
+        assert!(FetchError { status: Some(401), message: String::new() }.is_auth_error());
+        assert!(FetchError { status: Some(403), message: String::new() }.is_auth_error());
+        assert!(FetchError { status: Some(404), message: String::new() }.is_auth_error());
+        assert!(!FetchError { status: Some(500), message: String::new() }.is_auth_error());
+        assert!(!FetchError { status: None, message: String::new() }.is_auth_error());
     }
 }

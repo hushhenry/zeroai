@@ -1,5 +1,6 @@
 use zeroai::{
     AiClient, ConfigManager, StreamEvent, RequestOptions,
+    models::{fetch_models_for_provider, is_custom_provider},
     split_model_id,
     types::{
         ChatContext, ContentBlock, Message, ModelDef, TextContent, ToolDef, ToolResultMessage,
@@ -9,6 +10,7 @@ use zeroai::{
 use futures::StreamExt;
 use rand::seq::IndexedRandom;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 
 /// Run the doctor check.
 pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
@@ -21,14 +23,53 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
     }
 
     let all_static = zeroai::models::static_models::all_static_models();
+    let mut provider_models: HashMap<String, Vec<ModelDef>> = HashMap::new();
 
-    // Build the set of models to register with the client
+    // Static: group by provider
+    for m in &all_static {
+        provider_models
+            .entry(m.provider.clone())
+            .or_default()
+            .push(m.clone());
+    }
+
+    // Dynamic: fetch for each custom (and any other) provider that appears in enabled_models
+    let providers: Vec<String> = enabled_models
+        .iter()
+        .filter_map(|full_id| split_model_id(full_id).map(|(p, _)| p.to_string()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    for provider in &providers {
+        if is_custom_provider(provider) {
+            let api_key = config.resolve_api_key(provider).await.ok().flatten();
+            let models_url = config.get_models_url(provider).ok().flatten();
+            match fetch_models_for_provider(provider, api_key.as_deref(), models_url.as_deref()).await {
+                Ok(list) => {
+                    provider_models.insert(provider.clone(), list);
+                }
+                Err(e) => {
+                    if e.is_auth_error() {
+                        println!(
+                            "  Auth failure for {}: {} {}",
+                            provider,
+                            e.status.unwrap_or(0),
+                            e.message
+                        );
+                    }
+                    provider_models.insert(provider.clone(), Vec::new());
+                }
+            }
+        }
+    }
+
+    // Build the set of models to register with the client (static + fetched)
     let mut registered_models: Vec<(String, ModelDef)> = Vec::new();
     for full_id in &enabled_models {
         if let Some((provider, model_id)) = split_model_id(full_id) {
-            if let Some(def) = all_static
-                .iter()
-                .find(|m| m.provider == provider && m.id == model_id)
+            if let Some(def) = provider_models
+                .get(provider)
+                .and_then(|list| list.iter().find(|m| m.id == model_id))
             {
                 registered_models.push((full_id.clone(), def.clone()));
             }
@@ -283,4 +324,36 @@ async fn check_model(
     }
 
     Ok(report)
+}
+
+/// Validate credentials for all configured providers by calling /v1/models (or static list).
+pub async fn run_auth_check() -> anyhow::Result<()> {
+    let config = ConfigManager::default_path();
+    let providers = config.list_providers_with_credentials()?;
+    if providers.is_empty() {
+        println!("No providers with credentials. Run `ai-proxy config` first.");
+        return Ok(());
+    }
+    println!("Checking credentials for {} provider(s)...\n", providers.len());
+    for provider in &providers {
+        let api_key = config.resolve_api_key(provider).await.ok().flatten();
+        let models_url = config.get_models_url(provider).ok().flatten();
+        match fetch_models_for_provider(provider, api_key.as_deref(), models_url.as_deref()).await {
+            Ok(list) => {
+                println!("  ✅ {} ({} model(s))", provider, list.len());
+            }
+            Err(e) => {
+                if e.is_auth_error() {
+                    println!(
+                        "  ❌ {}: {} Unauthorized / Forbidden",
+                        provider,
+                        e.status.unwrap_or(0)
+                    );
+                } else {
+                    println!("  ❌ {}: {}", provider, e.message);
+                }
+            }
+        }
+    }
+    Ok(())
 }

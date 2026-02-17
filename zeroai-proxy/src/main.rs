@@ -27,6 +27,9 @@ enum Commands {
     /// Configure providers and models (TUI)
     Config,
 
+    /// Validate credentials for all configured providers (e.g. /v1/models)
+    AuthCheck,
+
     /// Check provider health
     Doctor {
         /// Specific model to check (format: <provider>/<model>)
@@ -52,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Config => {
             config_tui::run_config_tui().await?;
+        }
+        Commands::AuthCheck => {
+            doctor::run_auth_check().await?;
         }
         Commands::Doctor { model } => {
             doctor::run_doctor(model.as_deref()).await?;

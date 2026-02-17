@@ -53,6 +53,8 @@ struct ModelsUrlInputState {
     provider_id: String,
     base_url: String,
     input: String,
+    /// Auth/test failure message; shown when fetch fails (don't save until fixed).
+    auth_error: Option<String>,
 }
 
 struct AuthInputState {
@@ -262,6 +264,7 @@ async fn run_tui_loop(
                                                 provider_id: provider_id.clone(),
                                                 base_url: base_url.to_string(),
                                                 input: input_url,
+                                                auth_error: None,
                                             });
                                         } else {
                                             enter_model_selection(&config, &provider_id, screen).await?;
@@ -284,14 +287,29 @@ async fn run_tui_loop(
                                 } else {
                                     Some(state.input.trim().to_string())
                                 };
-                                let _ = config.set_models_url(&pid, url_opt.as_deref());
-                                *screen = Screen::ProviderGroups;
-                                enter_model_selection(&config, &pid, screen).await?;
+                                let api_key = config.resolve_api_key(&pid).await.ok().flatten();
+                                match fetch_models_for_provider(&pid, api_key.as_deref(), url_opt.as_deref()).await {
+                                    Ok(_) => {
+                                        let _ = config.set_models_url(&pid, url_opt.as_deref());
+                                        *screen = Screen::ProviderGroups;
+                                        enter_model_selection(&config, &pid, screen).await?;
+                                    }
+                                    Err(e) => {
+                                        let msg = if e.is_auth_error() {
+                                            format!("❌ Failed: {} {}", e.status.unwrap_or(0), e.message)
+                                        } else {
+                                            format!("❌ Failed: {}", e)
+                                        };
+                                        state.auth_error = Some(msg);
+                                    }
+                                }
                             }
                             KeyCode::Backspace => {
+                                state.auth_error = None;
                                 state.input.pop();
                             }
                             KeyCode::Char(c) => {
+                                state.auth_error = None;
                                 state.input.push(c);
                             }
                             _ => {}
@@ -361,6 +379,7 @@ async fn run_tui_loop(
                     provider_id: pid.clone(),
                     base_url: base_url.to_string(),
                     input: input_url,
+                    auth_error: None,
                 });
             } else {
                 enter_model_selection(&config, &pid, screen).await?;
@@ -385,6 +404,7 @@ async fn handle_provider_select(
                 provider_id: provider_id.clone(),
                 base_url: base_url.to_string(),
                 input,
+                auth_error: None,
             });
             return Ok(());
         }
@@ -400,6 +420,7 @@ async fn handle_provider_select(
                 provider_id: provider_id.clone(),
                 base_url: base_url.to_string(),
                 input,
+                auth_error: None,
             });
             return Ok(());
         }
@@ -416,6 +437,7 @@ async fn handle_provider_select(
                 provider_id: provider_id.clone(),
                 base_url: base_url.to_string(),
                 input,
+                auth_error: None,
             });
             return Ok(());
         }
@@ -640,7 +662,12 @@ fn draw(
                 "For custom OpenAI-compatible providers, enter models_url (or leave blank for {}/v1/models)",
                 state.base_url
             );
-            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(2)]).split(area);
+            let constraints: Vec<Constraint> = if state.auth_error.is_some() {
+                vec![Constraint::Length(3), Constraint::Length(3), Constraint::Min(2), Constraint::Min(2)]
+            } else {
+                vec![Constraint::Length(3), Constraint::Length(3), Constraint::Min(2)]
+            };
+            let chunks = Layout::vertical(constraints).split(area);
             f.render_widget(
                 Paragraph::new(hint).block(Block::default().borders(Borders::ALL)),
                 chunks[0],
@@ -656,6 +683,12 @@ fn draw(
                 Paragraph::new(state.input.clone()).block(Block::default().borders(Borders::ALL).title(input_title)),
                 chunks[1],
             );
+            if let Some(err) = &state.auth_error {
+                f.render_widget(
+                    Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+                    chunks[2],
+                );
+            }
         }
         Screen::ModelSelect(state) => {
             let items: Vec<ListItem> = state.models.iter().map(|(id, selected)| {
