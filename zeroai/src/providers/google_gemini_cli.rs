@@ -358,6 +358,11 @@ static TOOL_CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 // Provider impl
 // ---------------------------------------------------------------------------
 
+#[derive(Deserialize)]
+struct SingleResponse {
+    response: Option<ResponseData>,
+}
+
 #[async_trait]
 impl Provider for GoogleGeminiCliProvider {
     fn stream(
@@ -686,6 +691,56 @@ impl Provider for GoogleGeminiCliProvider {
         };
 
         Box::pin(s)
+    }
+
+    async fn chat(
+        &self,
+        model: &ModelDef,
+        context: &ChatContext,
+        options: &StreamOptions,
+    ) -> Result<AssistantMessage, ProviderError> {
+        let mut stream = self.stream(model, context, options);
+        let mut full_msg = AssistantMessage {
+            content: Vec::new(),
+            model: model.id.clone(),
+            provider: model.provider.clone(),
+            usage: None,
+            stop_reason: StopReason::Stop,
+        };
+
+        let mut text_buf = String::new();
+        let mut thinking_buf = String::new();
+        let mut tool_calls = Vec::new();
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                StreamEvent::TextDelta(d) => text_buf.push_str(&d),
+                StreamEvent::ThinkingDelta(d) => thinking_buf.push_str(&d),
+                StreamEvent::ToolCallEnd { tool_call, .. } => tool_calls.push(tool_call),
+                StreamEvent::Done { message } => {
+                    full_msg.usage = message.usage;
+                    full_msg.stop_reason = message.stop_reason;
+                }
+                _ => {}
+            }
+        }
+
+        if !thinking_buf.is_empty() {
+            full_msg.content.push(ContentBlock::Thinking(ThinkingContent {
+                thinking: thinking_buf,
+                signature: None,
+            }));
+        }
+        if !text_buf.is_empty() {
+            full_msg.content.push(ContentBlock::Text(TextContent {
+                text: text_buf,
+            }));
+        }
+        for tc in tool_calls {
+            full_msg.content.push(ContentBlock::ToolCall(tc));
+        }
+
+        Ok(full_msg)
     }
 
     async fn list_models(&self, _api_key: &str) -> Result<Vec<ModelDef>, ProviderError> {

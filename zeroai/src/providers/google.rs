@@ -303,6 +303,13 @@ fn convert_tools(tools: &[ToolDef]) -> Vec<ToolDeclaration> {
 
 static TOOL_CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateContentResponse {
+    candidates: Vec<Candidate>,
+    usage_metadata: Option<UsageMetadata>,
+}
+
 #[async_trait]
 impl Provider for GoogleProvider {
     fn stream(
@@ -539,6 +546,157 @@ impl Provider for GoogleProvider {
         };
 
         Box::pin(s)
+    }
+
+    async fn chat(
+        &self,
+        model: &ModelDef,
+        context: &ChatContext,
+        options: &StreamOptions,
+    ) -> Result<AssistantMessage, ProviderError> {
+        let api_key = match &options.api_key {
+            Some(k) => k.clone(),
+            None => {
+                return Err(ProviderError::AuthRequired(
+                    "API key required for Google".into(),
+                ));
+            }
+        };
+
+        let base_url = model.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/models/{}:generateContent?key={}", base_url, model.id, api_key);
+
+        let contents = convert_messages(context);
+
+        let system_instruction = context.system_prompt.as_ref().map(|sp| SystemInstruction {
+            parts: vec![Part {
+                text: Some(sp.clone()),
+                function_call: None,
+                function_response: None,
+                inline_data: None,
+            }],
+        });
+
+        let mut gen_config = GenerationConfig {
+            temperature: options.temperature,
+            max_output_tokens: options.max_tokens,
+            thinking_config: None,
+        };
+
+        if model.reasoning {
+            if let Some(level) = &options.reasoning {
+                let budget = match level {
+                    ThinkingLevel::Minimal => 1024,
+                    ThinkingLevel::Low => 2048,
+                    ThinkingLevel::Medium => 8192,
+                    ThinkingLevel::High => 16384,
+                };
+                gen_config.thinking_config = Some(ThinkingConfig {
+                    include_thoughts: true,
+                    thinking_budget: Some(budget),
+                });
+            }
+        }
+
+        let tools = if context.tools.is_empty() {
+            None
+        } else {
+            Some(convert_tools(&context.tools))
+        };
+
+        let body = GenerateContentRequest {
+            contents,
+            system_instruction,
+            generation_config: Some(gen_config),
+            tools,
+        };
+
+        let resp = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                body: resp.text().await.unwrap_or_default(),
+            });
+        }
+
+        let gen_resp: GenerateContentResponse = resp.json().await?;
+
+        let mut text_buf = String::new();
+        let mut thinking_buf = String::new();
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::Stop;
+        let mut usage = Usage::default();
+
+        if let Some(um) = gen_resp.usage_metadata {
+            let prompt = um.prompt_token_count.unwrap_or(0);
+            let cached = um.cached_content_token_count.unwrap_or(0);
+            usage.input_tokens = prompt.saturating_sub(cached);
+            usage.cache_read_tokens = cached;
+            usage.output_tokens = um.candidates_token_count.unwrap_or(0) + um.thoughts_token_count.unwrap_or(0);
+            usage.total_tokens = um.total_token_count.unwrap_or(0);
+        }
+
+        if let Some(candidate) = gen_resp.candidates.first() {
+            if let Some(reason) = &candidate.finish_reason {
+                stop_reason = match reason.as_str() {
+                    "STOP" => StopReason::Stop,
+                    "MAX_TOKENS" => StopReason::Length,
+                    _ => StopReason::Stop,
+                };
+            }
+
+            if let Some(content) = &candidate.content {
+                if let Some(parts) = &content.parts {
+                    for part in parts {
+                        if let Some(text) = &part.text {
+                            if part.thought.unwrap_or(false) {
+                                thinking_buf.push_str(text);
+                            } else {
+                                text_buf.push_str(text);
+                            }
+                        }
+                        if let Some(fc) = &part.function_call {
+                            let counter = TOOL_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tool_calls.push(ToolCall {
+                                id: format!("{}_{}", fc.name, counter),
+                                name: fc.name.clone(),
+                                arguments: fc.args.clone().unwrap_or(json!({})),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if !tool_calls.is_empty() {
+            stop_reason = StopReason::ToolUse;
+        }
+
+        let mut content = Vec::new();
+        if !thinking_buf.is_empty() {
+            content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
+        }
+        if !text_buf.is_empty() {
+            content.push(ContentBlock::Text(TextContent { text: text_buf }));
+        }
+        for tc in tool_calls {
+            content.push(ContentBlock::ToolCall(tc));
+        }
+
+        Ok(AssistantMessage {
+            content,
+            model: model.id.clone(),
+            provider: model.provider.clone(),
+            usage: Some(usage),
+            stop_reason,
+        })
     }
 
     async fn list_models(&self, api_key: &str) -> Result<Vec<ModelDef>, ProviderError> {

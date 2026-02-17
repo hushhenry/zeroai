@@ -62,6 +62,34 @@ impl AiClient {
         
         Ok(Box::pin(mapped))
     }
+
+    pub async fn chat(
+        &self,
+        full_model_id: &str,
+        model_def: &ModelDef,
+        context: &ChatContext,
+        options: &StreamOptions,
+    ) -> Result<AssistantMessage, ProviderError> {
+        let (provider_name, _short_model_id) = self.mapper.split_id(full_model_id).ok_or_else(|| {
+            ProviderError::Other(format!("Invalid model ID format: {}", full_model_id))
+        })?;
+
+        // Resolve provider
+        let provider = self.providers.get(provider_name).ok_or_else(|| {
+            ProviderError::Other(format!("Unknown provider: {}", provider_name))
+        })?;
+
+        // Call the provider
+        let mut message = provider.chat(model_def, context, options).await?;
+
+        // Hook the response to add provider prefix back to the model ID
+        let p_name = provider_name.to_string();
+        let short_id = message.model.clone();
+        message.model = self.mapper.join_id(&p_name, &short_id);
+        message.provider = p_name;
+
+        Ok(message)
+    }
 }
 
 pub struct AiClientBuilder {

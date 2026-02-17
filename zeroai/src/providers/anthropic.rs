@@ -138,6 +138,25 @@ fn from_claude_code_name(name: &str, requested_tools: &[ToolDef]) -> String {
     name.to_string()
 }
 
+#[derive(Deserialize)]
+struct MessagesResponse {
+    content: Vec<AnthropicContentResp>,
+    usage: UsageData,
+    stop_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicContentResp {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: Option<String>,
+    thinking: Option<String>,
+    signature: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
+}
+
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn stream(
@@ -281,6 +300,148 @@ impl Provider for AnthropicProvider {
             yield Ok(StreamEvent::Done { message: AssistantMessage { content, model: model_id, provider: provider_id, usage: Some(usage), stop_reason } });
         };
         Box::pin(s)
+    }
+
+    async fn chat(
+        &self,
+        model: &ModelDef,
+        context: &ChatContext,
+        options: &StreamOptions,
+    ) -> Result<AssistantMessage, ProviderError> {
+        let api_key = match &options.api_key {
+            Some(k) => k.clone(),
+            None => {
+                return Err(ProviderError::AuthRequired(
+                    "API key required for Anthropic".into(),
+                ));
+            }
+        };
+
+        let is_setup_token = api_key.contains("sk-ant-sid");
+        let mut headers = HashMap::new();
+        headers.insert("x-api-key".to_string(), api_key.clone());
+        headers.insert("anthropic-version".to_string(), "2023-06-01".to_string());
+
+        let mut system_blocks = Vec::new();
+        if is_setup_token {
+            headers.insert(
+                "anthropic-beta".to_string(),
+                "claude-code-20250219,interleaved-thinking-2025-05-14".to_string(),
+            );
+            headers.insert(
+                "user-agent".to_string(),
+                "claude-cli/2.1.2 (external, cli)".to_string(),
+            );
+            system_blocks.push(json!({
+                "type": "text",
+                "text": "You are Claude Code, Anthropic's official CLI for Claude."
+            }));
+        }
+        if let Some(sys) = &context.system_prompt {
+            system_blocks.push(json!({"type": "text", "text": sys}));
+        }
+
+        let system = if system_blocks.is_empty() {
+            None
+        } else {
+            Some(json!(system_blocks))
+        };
+        let requested_tools = context.tools.clone();
+
+        let req_body = MessagesRequest {
+            model: model.id.clone(),
+            messages: convert_messages(context, is_setup_token),
+            max_tokens: options.max_tokens.unwrap_or(model.max_tokens),
+            system,
+            temperature: options.temperature,
+            stream: false,
+            tools: if context.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    context
+                        .tools
+                        .iter()
+                        .map(|t| AnthropicTool {
+                            name: if is_setup_token {
+                                to_claude_code_name(&t.name)
+                            } else {
+                                t.name.clone()
+                            },
+                            description: t.description.clone(),
+                            parameters: t.parameters.clone(),
+                        })
+                        .collect(),
+                )
+            },
+        };
+
+        let url = format!("{}/messages", model.base_url.trim_end_matches('/'));
+        let mut req = self.client.post(&url);
+        for (k, v) in &headers {
+            req = req.header(k, v);
+        }
+
+        let resp = req.json(&req_body).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                body: resp.text().await.unwrap_or_default(),
+            });
+        }
+
+        let msg_resp: MessagesResponse = resp.json().await?;
+
+        let mut content = Vec::new();
+        for block in msg_resp.content {
+            match block.block_type.as_str() {
+                "text" => {
+                    if let Some(text) = block.text {
+                        content.push(ContentBlock::Text(TextContent { text }));
+                    }
+                }
+                "thinking" => {
+                    if let Some(thinking) = block.thinking {
+                        content.push(ContentBlock::Thinking(ThinkingContent {
+                            thinking,
+                            signature: block.signature,
+                        }));
+                    }
+                }
+                "tool_use" => {
+                    let id = block.id.unwrap_or_default();
+                    let mut name = block.name.unwrap_or_default();
+                    if is_setup_token {
+                        name = from_claude_code_name(&name, &requested_tools);
+                    }
+                    let arguments = block.input.unwrap_or(json!({}));
+                    content.push(ContentBlock::ToolCall(ToolCall { id, name, arguments }));
+                }
+                _ => {}
+            }
+        }
+
+        let usage = Usage {
+            input_tokens: msg_resp.usage.input_tokens,
+            output_tokens: msg_resp.usage.output_tokens,
+            total_tokens: msg_resp.usage.input_tokens + msg_resp.usage.output_tokens,
+            ..Default::default()
+        };
+
+        let stop_reason = match msg_resp.stop_reason.as_deref() {
+            Some("end_turn") => StopReason::Stop,
+            Some("tool_use") => StopReason::ToolUse,
+            _ => StopReason::Stop,
+        };
+
+        Ok(AssistantMessage {
+            content,
+            model: model.id.clone(),
+            provider: model.provider.clone(),
+            usage: Some(usage),
+            stop_reason,
+        })
     }
 
     async fn list_models(&self, _api_key: &str) -> Result<Vec<ModelDef>, ProviderError> {

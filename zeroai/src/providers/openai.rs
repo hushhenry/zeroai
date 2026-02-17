@@ -135,6 +135,40 @@ struct UsageResp {
     total_tokens: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+    usage: Option<UsageResp>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMessageResp,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatMessageResp {
+    #[allow(dead_code)]
+    role: String,
+    content: Option<String>,
+    tool_calls: Option<Vec<ToolCallResp>>,
+}
+
+#[derive(Deserialize)]
+struct ToolCallResp {
+    id: String,
+    #[allow(dead_code)]
+    r#type: String,
+    function: FunctionResp,
+}
+
+#[derive(Deserialize)]
+struct FunctionResp {
+    name: String,
+    arguments: String,
+}
+
 // ---------------------------------------------------------------------------
 // Models list response
 // ---------------------------------------------------------------------------
@@ -528,6 +562,113 @@ impl Provider for OpenAiProvider {
         };
 
         Box::pin(s)
+    }
+
+    async fn chat(
+        &self,
+        model: &ModelDef,
+        context: &ChatContext,
+        options: &StreamOptions,
+    ) -> Result<AssistantMessage, ProviderError> {
+        let api_key = match &options.api_key {
+            Some(k) => k.clone(),
+            None => {
+                return Err(ProviderError::AuthRequired(
+                    "API key required for OpenAI".into(),
+                ));
+            }
+        };
+
+        let base_url = model.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/chat/completions", base_url);
+
+        let messages = convert_messages(context);
+        let tools = if context.tools.is_empty() {
+            None
+        } else {
+            Some(convert_tools(&context.tools))
+        };
+
+        let body = ChatRequest {
+            model: model.id.clone(),
+            messages,
+            temperature: options.temperature,
+            max_tokens: options.max_tokens,
+            stream: false,
+            tools,
+            stream_options: None,
+        };
+
+        let mut headers_map = HashMap::new();
+        if let Some(model_headers) = &model.headers {
+            headers_map.extend(model_headers.clone());
+        }
+        if let Some(extra) = &options.extra_headers {
+            headers_map.extend(extra.clone());
+        }
+
+        let mut req = self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json");
+
+        for (k, v) in &headers_map {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        let resp = req.json(&body).send().await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                body: body_text,
+            });
+        }
+
+        let chat_resp: ChatResponse = resp.json().await?;
+        
+        let mut usage = Usage::default();
+        if let Some(u) = chat_resp.usage {
+            usage.input_tokens = u.prompt_tokens.unwrap_or(0);
+            usage.output_tokens = u.completion_tokens.unwrap_or(0);
+            usage.total_tokens = u.total_tokens.unwrap_or(0);
+        }
+
+        if let Some(choice) = chat_resp.choices.first() {
+            let mut content = Vec::new();
+            if let Some(text) = &choice.message.content {
+                content.push(ContentBlock::Text(TextContent { text: text.clone() }));
+            }
+            if let Some(tc_resps) = &choice.message.tool_calls {
+                for tc in tc_resps {
+                    let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                    content.push(ContentBlock::ToolCall(ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments,
+                    }));
+                }
+            }
+
+            let stop_reason = match choice.finish_reason.as_deref() {
+                Some("stop") => StopReason::Stop,
+                Some("length") => StopReason::Length,
+                Some("tool_calls") => StopReason::ToolUse,
+                _ => StopReason::Stop,
+            };
+
+            Ok(AssistantMessage {
+                content,
+                model: model.id.clone(),
+                provider: model.provider.clone(),
+                usage: Some(usage),
+                stop_reason,
+            })
+        } else {
+            Err(ProviderError::Other("Empty response from OpenAI".into()))
+        }
     }
 
     async fn list_models(&self, api_key: &str) -> Result<Vec<ModelDef>, ProviderError> {

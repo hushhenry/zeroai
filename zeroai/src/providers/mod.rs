@@ -3,7 +3,7 @@ pub mod google;
 pub mod google_gemini_cli;
 pub mod openai;
 
-use crate::types::{ChatContext, ModelDef, StreamEvent, StreamOptions};
+use crate::types::{AssistantMessage, ChatContext, ModelDef, StreamEvent, StreamOptions};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
@@ -42,6 +42,14 @@ pub trait Provider: Send + Sync {
         context: &ChatContext,
         options: &StreamOptions,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>>;
+
+    /// Execute a chat completion (non-streaming).
+    async fn chat(
+        &self,
+        model: &ModelDef,
+        context: &ChatContext,
+        options: &StreamOptions,
+    ) -> Result<AssistantMessage, ProviderError>;
 
     /// List models available from this provider.
     /// Some providers support dynamic model listing via API; others return a static list.
