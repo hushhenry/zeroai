@@ -1,5 +1,5 @@
 [workspace]
-members = ["ai", "ai-proxy"]
+members = ["zeroai", "zeroai-proxy"]
 resolver = "3"
 
 [workspace.dependencies]

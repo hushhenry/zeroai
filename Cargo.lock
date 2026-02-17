@@ -12,64 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ai"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "base64",
- "bytes",
- "chrono",
- "dirs",
- "eventsource-stream",
- "futures",
- "genai",
- "open",
- "pin-project-lite",
- "rand",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "ai-proxy"
-version = "0.1.0"
-dependencies = [
- "ai",
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "crossterm 0.29.0",
- "futures",
- "http",
- "http-body-util",
- "rand",
- "ratatui",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3607,6 +3549,64 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "zeroai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "dirs",
+ "eventsource-stream",
+ "futures",
+ "genai",
+ "open",
+ "pin-project-lite",
+ "rand",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "zeroai-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "crossterm 0.29.0",
+ "futures",
+ "http",
+ "http-body-util",
+ "rand",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "zeroai",
 ]
 
 [[package]]

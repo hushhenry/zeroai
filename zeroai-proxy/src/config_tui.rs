@@ -1,4 +1,4 @@
-use ai::{
+use zeroai::{
     ConfigManager,
     auth::{
         self, AuthMethod, Credential, ApiKeyCredential, SetupTokenCredential,
@@ -373,13 +373,13 @@ async fn handle_provider_select(
                     "anthropic" => Box::new(AnthropicOAuthProvider),
                     "gemini-cli" => Box::new(GeminiCliOAuthProvider),
                     "antigravity" => Box::new(AntigravityOAuthProvider),
-                    "openai-codex" => Box::new(ai::oauth::openai_codex::OpenAiCodexOAuthProvider),
-                    "github-copilot" => Box::new(ai::oauth::github_copilot::GitHubCopilotOAuthProvider),
-                    "qwen" => Box::new(ai::oauth::qwen_portal::QwenPortalOAuthProvider),
+                    "openai-codex" => Box::new(zeroai::oauth::openai_codex::OpenAiCodexOAuthProvider),
+                    "github-copilot" => Box::new(zeroai::oauth::github_copilot::GitHubCopilotOAuthProvider),
+                    "qwen" => Box::new(zeroai::oauth::qwen_portal::QwenPortalOAuthProvider),
                     _ => return,
                 };
                 if let Ok(creds) = oauth_provider.login(&*callbacks).await {
-                    let _ = config_mgr.set_credential(&pid, Credential::OAuth(ai::auth::OAuthCredential {
+                    let _ = config_mgr.set_credential(&pid, Credential::OAuth(zeroai::auth::OAuthCredential {
                         refresh: creds.refresh,
                         access: creds.access,
                         expires: creds.expires,

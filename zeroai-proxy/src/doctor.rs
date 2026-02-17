@@ -1,4 +1,4 @@
-use ai::{
+use zeroai::{
     AiClient, ConfigManager, ModelMapper, StreamEvent, StreamOptions,
     types::{
         ChatContext, ContentBlock, Message, ModelDef, TextContent, ToolDef, ToolResultMessage,
@@ -20,7 +20,7 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let all_static = ai::models::static_models::all_static_models();
+    let all_static = zeroai::models::static_models::all_static_models();
 
     // Determine which models to check
     let models_to_check: Vec<(String, ModelDef)> = if let Some(filter) = model_filter {

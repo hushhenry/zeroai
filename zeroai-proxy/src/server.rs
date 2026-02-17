@@ -1,4 +1,4 @@
-use ai::{
+use zeroai::{
     AiClient, ConfigManager, ModelMapper, StreamEvent, StreamOptions,
     types::{
         AssistantMessage, ChatContext, ContentBlock, Message, ModelDef, StopReason, TextContent,
@@ -52,7 +52,7 @@ impl AppState {
         let mut cache = Vec::new();
 
         // Build model defs from static lists
-        let all_static = ai::models::static_models::all_static_models();
+        let all_static = zeroai::models::static_models::all_static_models();
 
         for full_id in &enabled {
             if let Some((provider, model_id)) = ModelMapper::default().split_id(full_id) {
