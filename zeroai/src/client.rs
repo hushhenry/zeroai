@@ -1,4 +1,5 @@
 use crate::mapper::{join_model_id, split_model_id};
+use crate::providers::retry::{self, compute_backoff, is_non_retryable};
 use crate::providers::{Provider, ProviderError};
 use crate::providers::google_gemini_cli::GoogleGeminiCliProvider;
 use crate::providers::anthropic::AnthropicProvider;
@@ -8,6 +9,7 @@ use crate::types::*;
 use futures::stream::{BoxStream, StreamExt};
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// High-level AI client that coordinates multiple providers and model mapping.
 #[derive(Clone)]
@@ -43,7 +45,17 @@ impl AiClient {
             ProviderError::Other(format!("Unknown provider: {}", provider_name))
         })?;
 
-        let stream = provider.stream(&model_def, context, options);
+        let stream: BoxStream<'static, Result<StreamEvent, ProviderError>> = match &options.retry_config {
+            Some(config) => {
+                let provider = Arc::clone(provider);
+                let model_def = model_def.clone();
+                let context = context.clone();
+                let options = options.clone();
+                let config = config.clone();
+                retry::retry_stream(provider, model_def, context, options, config)
+            }
+            None => provider.stream(&model_def, context, options),
+        };
 
         let p_name = provider_name.to_string();
         let mapped = stream.map(move |event| match event {
@@ -77,14 +89,35 @@ impl AiClient {
             ProviderError::Other(format!("Unknown provider: {}", provider_name))
         })?;
 
-        let mut message = provider.chat(&model_def, context, options).await?;
+        let config = options.retry_config.as_ref();
+        let max_retries = config.map(|c| c.max_retries).unwrap_or(0);
+        let mut backoff_ms = config.map(|c| c.base_backoff_ms).unwrap_or(1000);
 
-        let p_name = provider_name.to_string();
-        let short_id = message.model.clone();
-        message.model = join_model_id(&p_name, &short_id);
-        message.provider = p_name;
-
-        Ok(message)
+        let mut last_err = None;
+        for attempt in 0..=max_retries {
+            match provider.chat(&model_def, context, options).await {
+                Ok(mut message) => {
+                    let p_name = provider_name.to_string();
+                    let short_id = message.model.clone();
+                    message.model = join_model_id(&p_name, &short_id);
+                    message.provider = p_name;
+                    return Ok(message);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let err = last_err.as_ref().unwrap();
+                    if is_non_retryable(err) || attempt >= max_retries {
+                        break;
+                    }
+                    let wait = config
+                        .map(|c| compute_backoff(c, backoff_ms, err))
+                        .unwrap_or(backoff_ms);
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                    backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| ProviderError::Other("no attempt".into())))
     }
 
     /// Resolve a full model ID to (provider_name, ModelDef).

@@ -165,7 +165,6 @@ impl ConfigManager {
                 // If expired or expiring within buffer
                 if now + (buffer_secs as i64 * 1000) >= oauth.expires {
                     let oauth_provider: Box<dyn crate::oauth::OAuthProvider> = match provider_id {
-                        "anthropic" => Box::new(crate::oauth::anthropic::AnthropicOAuthProvider),
                         "gemini-cli" => Box::new(crate::oauth::google_gemini_cli::GeminiCliOAuthProvider),
                         "antigravity" => Box::new(crate::oauth::google_antigravity::AntigravityOAuthProvider),
                         "openai-codex" => Box::new(crate::oauth::openai_codex::OpenAiCodexOAuthProvider),

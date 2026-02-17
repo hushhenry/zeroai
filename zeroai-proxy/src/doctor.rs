@@ -168,6 +168,7 @@ async fn check_model(
         reasoning: None,
         api_key: Some(api_key.to_string()),
         extra_headers: None,
+        retry_config: None,
     };
 
     let mut stream = client.stream(full_id, &context, &options)?;

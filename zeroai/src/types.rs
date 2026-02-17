@@ -213,6 +213,28 @@ pub struct ChatContext {
 }
 
 // ---------------------------------------------------------------------------
+// Retry configuration
+// ---------------------------------------------------------------------------
+
+/// Retry behavior for provider calls (exponential backoff, 429/408 retry, non-retryable 4xx).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retries (0 = no retries, 1 = one retry, etc.). Default 3.
+    pub max_retries: u32,
+    /// Base backoff delay in milliseconds. Doubled each retry, capped at 10s. Default 1000.
+    pub base_backoff_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_backoff_ms: 1000,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stream options
 // ---------------------------------------------------------------------------
 
@@ -232,6 +254,8 @@ pub struct RequestOptions {
     pub reasoning: Option<ThinkingLevel>,
     pub api_key: Option<String>,
     pub extra_headers: Option<HashMap<String, String>>,
+    /// When set, retry failed requests with exponential backoff (429/408 retried; other 4xx not).
+    pub retry_config: Option<RetryConfig>,
 }
 
 // ---------------------------------------------------------------------------

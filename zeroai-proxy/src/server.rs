@@ -323,6 +323,7 @@ async fn chat_completions(
         reasoning: None,
         api_key: Some(api_key),
         extra_headers: None,
+        retry_config: None,
     };
 
     let is_stream = req.stream.unwrap_or(false);
@@ -695,6 +696,7 @@ async fn anthropic_messages(
         reasoning: None,
         api_key: Some(api_key),
         extra_headers: None,
+        retry_config: None,
     };
 
     // Non-streaming Anthropic response

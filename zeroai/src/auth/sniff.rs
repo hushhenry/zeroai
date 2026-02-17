@@ -26,13 +26,8 @@ const ENV_VAR_MAP: &[(&str, &str)] = &[
 
 /// Try to get an API key from environment variables for the given provider.
 pub fn env_api_key(provider_id: &str) -> Option<String> {
-    // Special case: Anthropic has multiple env vars
+    // Special case: Anthropic uses ANTHROPIC_API_KEY only (OAuth removed)
     if provider_id == "anthropic" {
-        if let Ok(val) = std::env::var("ANTHROPIC_OAUTH_TOKEN") {
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
         if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
             if !val.is_empty() {
                 return Some(val);
@@ -68,14 +63,6 @@ pub fn sniff_all_env_vars() -> HashMap<String, String> {
         if let Ok(val) = std::env::var(env_var) {
             if !val.is_empty() {
                 found.insert(provider.to_string(), val);
-            }
-        }
-    }
-    // Special anthropic handling
-    if !found.contains_key("anthropic") {
-        if let Ok(val) = std::env::var("ANTHROPIC_OAUTH_TOKEN") {
-            if !val.is_empty() {
-                found.insert("anthropic".to_string(), val);
             }
         }
     }

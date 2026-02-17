@@ -6,7 +6,6 @@ use zeroai::{
     },
     models::static_models::static_models_for_provider,
     oauth::{
-        anthropic::AnthropicOAuthProvider,
         google_antigravity::AntigravityOAuthProvider,
         google_gemini_cli::GeminiCliOAuthProvider,
         OAuthProvider, OAuthCallbacks, OAuthAuthInfo, OAuthPrompt,
@@ -370,7 +369,6 @@ async fn handle_provider_select(
             let config_mgr = config.clone();
             tokio::spawn(async move {
                 let oauth_provider: Box<dyn OAuthProvider + Send> = match pid.as_str() {
-                    "anthropic" => Box::new(AnthropicOAuthProvider),
                     "gemini-cli" => Box::new(GeminiCliOAuthProvider),
                     "antigravity" => Box::new(AntigravityOAuthProvider),
                     "openai-codex" => Box::new(zeroai::oauth::openai_codex::OpenAiCodexOAuthProvider),

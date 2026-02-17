@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod google;
 pub mod google_gemini_cli;
 pub mod openai;
+pub mod retry;
 
 use crate::types::{AssistantMessage, ChatContext, ModelDef, RequestOptions, StreamEvent};
 use async_trait::async_trait;

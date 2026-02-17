@@ -1,4 +1,3 @@
-pub mod anthropic;
 pub mod github_copilot;
 pub mod google_antigravity;
 pub mod google_gemini_cli;
