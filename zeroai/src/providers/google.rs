@@ -316,7 +316,7 @@ impl Provider for GoogleProvider {
         &self,
         model: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
         let api_key = match &options.api_key {
             Some(k) => k.clone(),
@@ -552,7 +552,7 @@ impl Provider for GoogleProvider {
         &self,
         model: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> Result<AssistantMessage, ProviderError> {
         let api_key = match &options.api_key {
             Some(k) => k.clone(),

@@ -3,7 +3,7 @@ pub mod google;
 pub mod google_gemini_cli;
 pub mod openai;
 
-use crate::types::{AssistantMessage, ChatContext, ModelDef, StreamEvent, StreamOptions};
+use crate::types::{AssistantMessage, ChatContext, ModelDef, RequestOptions, StreamEvent};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
@@ -40,7 +40,7 @@ pub trait Provider: Send + Sync {
         &self,
         model: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>>;
 
     /// Execute a chat completion (non-streaming).
@@ -48,7 +48,7 @@ pub trait Provider: Send + Sync {
         &self,
         model: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> Result<AssistantMessage, ProviderError>;
 
     /// List models available from this provider.

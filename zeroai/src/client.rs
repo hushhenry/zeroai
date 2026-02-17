@@ -1,4 +1,4 @@
-use crate::mapper::ModelMapper;
+use crate::mapper::{join_model_id, split_model_id};
 use crate::providers::{Provider, ProviderError};
 use crate::providers::google_gemini_cli::GoogleGeminiCliProvider;
 use crate::providers::anthropic::AnthropicProvider;
@@ -12,8 +12,8 @@ use std::collections::HashMap;
 /// High-level AI client that coordinates multiple providers and model mapping.
 #[derive(Clone)]
 pub struct AiClient {
-    mapper: ModelMapper,
     providers: HashMap<String, Arc<dyn Provider>>,
+    models: HashMap<String, ModelDef>,
 }
 
 impl AiClient {
@@ -21,96 +21,113 @@ impl AiClient {
         AiClientBuilder::new()
     }
 
+    /// Return a reference to the internal models map.
+    pub fn models(&self) -> &HashMap<String, ModelDef> {
+        &self.models
+    }
+
+    /// Look up a model definition by full ID (e.g. "openai/gpt-4o").
+    pub fn get_model(&self, full_model_id: &str) -> Option<&ModelDef> {
+        self.models.get(full_model_id)
+    }
+
     pub fn stream(
         &self,
         full_model_id: &str,
-        model_def: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let (provider_name, _short_model_id) = self.mapper.split_id(full_model_id).ok_or_else(|| {
-            ProviderError::Other(format!("Invalid model ID format: {}", full_model_id))
-        })?;
+        let (provider_name, model_def) = self.resolve(full_model_id)?;
 
-        // Resolve provider
         let provider = self.providers.get(provider_name).ok_or_else(|| {
             ProviderError::Other(format!("Unknown provider: {}", provider_name))
         })?;
 
-        // Call the provider
-        let stream = provider.stream(model_def, context, options);
-        
-        // Hook the response to add provider prefix back to the model ID
+        let stream = provider.stream(&model_def, context, options);
+
         let p_name = provider_name.to_string();
-        let mapper = self.mapper.clone();
-        
         let mapped = stream.map(move |event| match event {
             Ok(StreamEvent::Done { mut message }) => {
                 let short_id = message.model.clone();
-                message.model = mapper.join_id(&p_name, &short_id);
+                message.model = join_model_id(&p_name, &short_id);
                 message.provider = p_name.clone();
                 Ok(StreamEvent::Done { message })
             }
             Ok(StreamEvent::Error { mut message }) => {
                 let short_id = message.model.clone();
-                message.model = mapper.join_id(&p_name, &short_id);
+                message.model = join_model_id(&p_name, &short_id);
                 message.provider = p_name.clone();
                 Ok(StreamEvent::Error { message })
             }
             other => other,
         });
-        
+
         Ok(Box::pin(mapped))
     }
 
     pub async fn chat(
         &self,
         full_model_id: &str,
-        model_def: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> Result<AssistantMessage, ProviderError> {
-        let (provider_name, _short_model_id) = self.mapper.split_id(full_model_id).ok_or_else(|| {
-            ProviderError::Other(format!("Invalid model ID format: {}", full_model_id))
-        })?;
+        let (provider_name, model_def) = self.resolve(full_model_id)?;
 
-        // Resolve provider
         let provider = self.providers.get(provider_name).ok_or_else(|| {
             ProviderError::Other(format!("Unknown provider: {}", provider_name))
         })?;
 
-        // Call the provider
-        let mut message = provider.chat(model_def, context, options).await?;
+        let mut message = provider.chat(&model_def, context, options).await?;
 
-        // Hook the response to add provider prefix back to the model ID
         let p_name = provider_name.to_string();
         let short_id = message.model.clone();
-        message.model = self.mapper.join_id(&p_name, &short_id);
+        message.model = join_model_id(&p_name, &short_id);
         message.provider = p_name;
 
         Ok(message)
     }
+
+    /// Resolve a full model ID to (provider_name, ModelDef).
+    fn resolve<'a>(&'a self, full_model_id: &'a str) -> Result<(&'a str, ModelDef), ProviderError> {
+        let (provider_name, _short_id) = split_model_id(full_model_id).ok_or_else(|| {
+            ProviderError::Other(format!("Invalid model ID format: {}", full_model_id))
+        })?;
+
+        let model_def = self.models.get(full_model_id).ok_or_else(|| {
+            ProviderError::Other(format!("Model not registered: {}", full_model_id))
+        })?;
+
+        Ok((provider_name, model_def.clone()))
+    }
 }
 
 pub struct AiClientBuilder {
-    mapper: Option<ModelMapper>,
+    models: HashMap<String, ModelDef>,
 }
 
 impl AiClientBuilder {
     pub fn new() -> Self {
-        Self { mapper: None }
+        Self {
+            models: HashMap::new(),
+        }
     }
 
-    pub fn with_mapper(mut self, mapper: ModelMapper) -> Self {
-        self.mapper = Some(mapper);
+    /// Register a single model under its full ID (`provider/model`).
+    pub fn with_model(mut self, full_id: String, def: ModelDef) -> Self {
+        self.models.insert(full_id, def);
+        self
+    }
+
+    /// Register multiple models at once. Each model's full ID is derived from
+    /// `provider/id` fields on the `ModelDef`.
+    pub fn with_models(mut self, models: impl IntoIterator<Item = (String, ModelDef)>) -> Self {
+        self.models.extend(models);
         self
     }
 
     pub fn build(self) -> AiClient {
-        let mapper = self.mapper.unwrap_or_default();
-        let mut providers = HashMap::new();
-        
-        // Register all providers
+        let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+
         let openai = Arc::new(OpenAiProvider::new());
         providers.insert("openai".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("deepseek".into(), openai.clone() as Arc<dyn Provider>);
@@ -143,8 +160,8 @@ impl AiClientBuilder {
         providers.insert("antigravity".into(), Arc::new(GoogleGeminiCliProvider::new_antigravity()) as Arc<dyn Provider>);
 
         AiClient {
-            mapper,
             providers,
+            models: self.models,
         }
     }
 }

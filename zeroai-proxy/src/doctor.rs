@@ -1,5 +1,6 @@
 use zeroai::{
-    AiClient, ConfigManager, ModelMapper, StreamEvent, StreamOptions,
+    AiClient, ConfigManager, StreamEvent, RequestOptions,
+    split_model_id,
     types::{
         ChatContext, ContentBlock, Message, ModelDef, TextContent, ToolDef, ToolResultMessage,
         UserMessage,
@@ -12,7 +13,6 @@ use serde_json::json;
 /// Run the doctor check.
 pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
     let config = ConfigManager::default_path();
-    let client = AiClient::builder().build();
     let enabled_models = config.get_enabled_models()?;
 
     if enabled_models.is_empty() {
@@ -22,17 +22,30 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
 
     let all_static = zeroai::models::static_models::all_static_models();
 
+    // Build the set of models to register with the client
+    let mut registered_models: Vec<(String, ModelDef)> = Vec::new();
+    for full_id in &enabled_models {
+        if let Some((provider, model_id)) = split_model_id(full_id) {
+            if let Some(def) = all_static
+                .iter()
+                .find(|m| m.provider == provider && m.id == model_id)
+            {
+                registered_models.push((full_id.clone(), def.clone()));
+            }
+        }
+    }
+
+    let client = AiClient::builder()
+        .with_models(registered_models.clone())
+        .build();
+
     // Determine which models to check
     let models_to_check: Vec<(String, ModelDef)> = if let Some(filter) = model_filter {
-        // Check specific model
-        match all_static
+        match registered_models
             .iter()
-            .find(|m| {
-                let full_id = format!("{}/{}", m.provider, m.id);
-                full_id == filter
-            })
+            .find(|(id, _)| id == filter)
         {
-            Some(def) => vec![(filter.to_string(), def.clone())],
+            Some((id, def)) => vec![(id.clone(), def.clone())],
             None => {
                 println!("Model not found: {}", filter);
                 return Ok(());
@@ -40,25 +53,23 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
         }
     } else {
         // One random model per provider from the enabled list
-        let mut provider_models: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        for full_id in &enabled_models {
-            if let Some((provider, _)) = ModelMapper::default().split_id(full_id) {
-                provider_models.entry(provider.to_string()).or_default().push(full_id.clone());
+        let mut provider_models: std::collections::HashMap<String, Vec<(String, ModelDef)>> =
+            std::collections::HashMap::new();
+        for (full_id, def) in &registered_models {
+            if let Some((provider, _)) = split_model_id(full_id) {
+                provider_models
+                    .entry(provider.to_string())
+                    .or_default()
+                    .push((full_id.clone(), def.clone()));
             }
         }
 
         let mut rng = rand::rng();
         let mut selected: Vec<(String, ModelDef)> = Vec::new();
 
-        for (provider, models) in provider_models {
-            if let Some(full_id) = models.choose(&mut rng) {
-                let (_, model_id) = ModelMapper::default().split_id(full_id).unwrap();
-                if let Some(def) = all_static
-                    .iter()
-                    .find(|m| m.provider == provider && m.id == model_id)
-                {
-                    selected.push((full_id.to_string(), def.clone()));
-                }
+        for (_provider, models) in provider_models {
+            if let Some((full_id, def)) = models.choose(&mut rng) {
+                selected.push((full_id.clone(), def.clone()));
             }
         }
 
@@ -81,8 +92,8 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
         }),
     };
 
-    for (full_id, model_def) in &models_to_check {
-        let (provider, _) = ModelMapper::default().split_id(full_id).unwrap();
+    for (full_id, _model_def) in &models_to_check {
+        let (provider, _) = split_model_id(full_id).unwrap();
         let api_key = config.resolve_api_key(provider).await?;
 
         if api_key.is_none() {
@@ -92,11 +103,9 @@ pub async fn run_doctor(model_filter: Option<&str>) -> anyhow::Result<()> {
 
         println!("\n📋 Checking {}...", full_id);
 
-        // Test streaming
         let stream_result = check_model(
             &client,
             full_id,
-            model_def,
             api_key.as_deref().unwrap(),
             &tool,
         )
@@ -140,7 +149,6 @@ struct CheckReport {
 async fn check_model(
     client: &AiClient,
     full_id: &str,
-    model_def: &ModelDef,
     api_key: &str,
     tool: &ToolDef,
 ) -> anyhow::Result<CheckReport> {
@@ -154,7 +162,7 @@ async fn check_model(
         tools: vec![tool.clone()],
     };
 
-    let options = StreamOptions {
+    let options = RequestOptions {
         temperature: Some(0.0),
         max_tokens: Some(1024),
         reasoning: None,
@@ -162,7 +170,7 @@ async fn check_model(
         extra_headers: None,
     };
 
-    let mut stream = client.stream(full_id, model_def, &context, &options)?;
+    let mut stream = client.stream(full_id, &context, &options)?;
 
     let mut report = CheckReport {
         total_tokens: 0,
@@ -244,7 +252,7 @@ async fn check_model(
                     tools: vec![tool.clone()],
                 };
 
-                match client.stream(full_id, model_def, &follow_up, &options) {
+                match client.stream(full_id, &follow_up, &options) {
                     Ok(mut s2) => {
                         while let Some(event) = s2.next().await {
                             match event {

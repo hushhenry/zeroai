@@ -358,18 +358,13 @@ static TOOL_CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 // Provider impl
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct SingleResponse {
-    response: Option<ResponseData>,
-}
-
 #[async_trait]
 impl Provider for GoogleGeminiCliProvider {
     fn stream(
         &self,
         model: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
         let api_key_raw = match &options.api_key {
             Some(k) => k.clone(),
@@ -697,7 +692,7 @@ impl Provider for GoogleGeminiCliProvider {
         &self,
         model: &ModelDef,
         context: &ChatContext,
-        options: &StreamOptions,
+        options: &RequestOptions,
     ) -> Result<AssistantMessage, ProviderError> {
         let mut stream = self.stream(model, context, options);
         let mut full_msg = AssistantMessage {

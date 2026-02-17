@@ -226,7 +226,7 @@ pub enum ThinkingLevel {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct StreamOptions {
+pub struct RequestOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub reasoning: Option<ThinkingLevel>,

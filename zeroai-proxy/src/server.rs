@@ -1,7 +1,8 @@
 use zeroai::{
-    AiClient, ConfigManager, ModelMapper, StreamEvent, StreamOptions,
+    AiClient, ConfigManager, StreamEvent, RequestOptions,
+    split_model_id,
     types::{
-        AssistantMessage, ChatContext, ContentBlock, Message, ModelDef, StopReason, TextContent,
+        AssistantMessage, ChatContext, ContentBlock, Message, StopReason, TextContent,
         ThinkingContent, ToolCall, ToolDef, ToolResultMessage, UserMessage,
     },
 };
@@ -23,65 +24,51 @@ use tokio::sync::RwLock;
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
-    pub client: AiClient,
+    pub client: RwLock<AiClient>,
     pub config: ConfigManager,
-    /// Cache of model definitions keyed by `<provider>/<model>`.
-    pub models_cache: RwLock<Vec<(String, ModelDef)>>,
 }
 
 impl AppState {
     pub async fn new() -> anyhow::Result<Self> {
         let config = ConfigManager::default_path();
-        let client = AiClient::builder().build();
+        let client = build_client(&config);
 
-        let state = Self {
-            client,
+        Ok(Self {
+            client: RwLock::new(client),
             config,
-            models_cache: RwLock::new(Vec::new()),
-        };
-
-        state.refresh_models_cache().await;
-
-        Ok(state)
+        })
     }
 
-    /// Rebuild the models cache from enabled models in config.
-    pub async fn refresh_models_cache(&self) {
-        let enabled = self.config.get_enabled_models().unwrap_or_default();
-
-        let mut cache = Vec::new();
-
-        // Build model defs from static lists
-        let all_static = zeroai::models::static_models::all_static_models();
-
-        for full_id in &enabled {
-            if let Some((provider, model_id)) = ModelMapper::default().split_id(full_id) {
-                // Look up in static models
-                if let Some(def) = all_static
-                    .iter()
-                    .find(|m| m.provider == provider && m.id == model_id)
-                {
-                    cache.push((full_id.clone(), def.clone()));
-                }
-            }
-        }
-
-        *self.models_cache.write().await = cache;
-    }
-
-    /// Find a model definition by full ID.
-    pub async fn find_model(&self, full_id: &str) -> Option<ModelDef> {
-        let cache = self.models_cache.read().await;
-        cache
-            .iter()
-            .find(|(id, _)| id == full_id)
-            .map(|(_, def)| def.clone())
+    /// Rebuild the AiClient with fresh model data from config.
+    pub async fn refresh_models(&self) {
+        let new_client = build_client(&self.config);
+        *self.client.write().await = new_client;
     }
 
     /// Resolve API key for a provider.
     pub async fn resolve_api_key(&self, provider: &str) -> Option<String> {
         self.config.resolve_api_key(provider).await.ok().flatten()
     }
+}
+
+/// Build an AiClient populated with the enabled models from config.
+fn build_client(config: &ConfigManager) -> AiClient {
+    let enabled = config.get_enabled_models().unwrap_or_default();
+    let all_static = zeroai::models::static_models::all_static_models();
+
+    let mut models = Vec::new();
+    for full_id in &enabled {
+        if let Some((provider, model_id)) = split_model_id(full_id) {
+            if let Some(def) = all_static
+                .iter()
+                .find(|m| m.provider == provider && m.id == model_id)
+            {
+                models.push((full_id.clone(), def.clone()));
+            }
+        }
+    }
+
+    AiClient::builder().with_models(models).build()
 }
 
 // ---------------------------------------------------------------------------
@@ -129,8 +116,9 @@ struct ModelObject {
 }
 
 async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelsResponse> {
-    let cache = state.models_cache.read().await;
-    let data: Vec<ModelObject> = cache
+    let client = state.client.read().await;
+    let data: Vec<ModelObject> = client
+        .models()
         .iter()
         .map(|(full_id, def)| ModelObject {
             id: full_id.clone(),
@@ -289,19 +277,8 @@ async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
-    let model_def = match state.find_model(&req.model).await {
-        Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": {"message": format!("Model not found: {}", req.model)}})),
-            )
-                .into_response();
-        }
-    };
-
-    let (provider_name, _) = match ModelMapper::default().split_id(&req.model) {
-        Some(p) => p,
+    let provider_name = match split_model_id(&req.model) {
+        Some((p, _)) => p.to_string(),
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -311,7 +288,16 @@ async fn chat_completions(
         }
     };
 
-    let api_key = match state.resolve_api_key(provider_name).await {
+    let client = state.client.read().await;
+    if client.get_model(&req.model).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("Model not found: {}", req.model)}})),
+        )
+            .into_response();
+    }
+
+    let api_key = match state.resolve_api_key(&provider_name).await {
         Some(k) => k,
         None => {
             return (
@@ -331,7 +317,7 @@ async fn chat_completions(
         tools,
     };
 
-    let options = StreamOptions {
+    let options = RequestOptions {
         temperature: req.temperature,
         max_tokens: req.max_tokens,
         reasoning: None,
@@ -342,7 +328,7 @@ async fn chat_completions(
     let is_stream = req.stream.unwrap_or(false);
 
     if is_stream {
-        let event_stream = match state.client.stream(&req.model, &model_def, &context, &options) {
+        let event_stream = match client.stream(&req.model, &context, &options) {
             Ok(s) => s,
             Err(e) => {
                 return (
@@ -455,7 +441,7 @@ async fn chat_completions(
         Sse::new(sse).into_response()
     } else {
         // Non-streaming: collect the full response
-        let event_stream = match state.client.stream(&req.model, &model_def, &context, &options) {
+        let event_stream = match client.stream(&req.model, &context, &options) {
             Ok(s) => s,
             Err(e) => {
                 return (
@@ -651,19 +637,8 @@ async fn anthropic_messages(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AnthropicRequest>,
 ) -> Response {
-    let model_def = match state.find_model(&req.model).await {
-        Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"type": "error", "error": {"type": "not_found_error", "message": format!("Model not found: {}", req.model)}})),
-            )
-                .into_response();
-        }
-    };
-
-    let (provider_name, _) = match ModelMapper::default().split_id(&req.model) {
-        Some(p) => p,
+    let provider_name = match split_model_id(&req.model) {
+        Some((p, _)) => p.to_string(),
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -673,7 +648,16 @@ async fn anthropic_messages(
         }
     };
 
-    let api_key = match state.resolve_api_key(provider_name).await {
+    let client = state.client.read().await;
+    if client.get_model(&req.model).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"type": "error", "error": {"type": "not_found_error", "message": format!("Model not found: {}", req.model)}})),
+        )
+            .into_response();
+    }
+
+    let api_key = match state.resolve_api_key(&provider_name).await {
         Some(k) => k,
         None => {
             return (
@@ -705,7 +689,7 @@ async fn anthropic_messages(
         tools,
     };
 
-    let options = StreamOptions {
+    let options = RequestOptions {
         temperature: req.temperature,
         max_tokens: Some(req.max_tokens),
         reasoning: None,
@@ -714,7 +698,7 @@ async fn anthropic_messages(
     };
 
     // Non-streaming Anthropic response
-    let event_stream = match state.client.stream(&req.model, &model_def, &context, &options) {
+    let event_stream = match client.stream(&req.model, &context, &options) {
         Ok(s) => s,
         Err(e) => {
             return (
