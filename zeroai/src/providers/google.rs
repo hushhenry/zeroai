@@ -1,3 +1,4 @@
+use super::sanitize;
 use super::{Provider, ProviderError};
 use crate::types::*;
 use async_trait::async_trait;
@@ -404,7 +405,7 @@ impl Provider for GoogleProvider {
                 let body_text = resp.text().await.unwrap_or_default();
                 yield Err(ProviderError::Http {
                     status: status.as_u16(),
-                    body: body_text,
+                    body: sanitize::sanitize_api_error(&body_text),
                 });
                 return;
             }
@@ -620,9 +621,10 @@ impl Provider for GoogleProvider {
 
         let status = resp.status();
         if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Http {
                 status: status.as_u16(),
-                body: resp.text().await.unwrap_or_default(),
+                body: sanitize::sanitize_api_error(&body),
             });
         }
 
@@ -707,11 +709,12 @@ impl Provider for GoogleProvider {
 
         let resp = self.client.get(&url).send().await?;
 
+        let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Http {
-                status: 400,
-                body,
+                status,
+                body: sanitize::sanitize_api_error(&body),
             });
         }
 

@@ -1,3 +1,4 @@
+use super::sanitize;
 use super::{Provider, ProviderError};
 use crate::types::*;
 use async_trait::async_trait;
@@ -537,7 +538,7 @@ impl Provider for GoogleGeminiCliProvider {
                 let body_text = resp.text().await.unwrap_or_default();
                 yield Err(ProviderError::Http {
                     status: status.as_u16(),
-                    body: body_text,
+                    body: sanitize::sanitize_api_error(&body_text),
                 });
                 return;
             }

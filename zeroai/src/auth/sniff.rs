@@ -6,7 +6,7 @@ use std::path::PathBuf;
 // Environment variable sniffing
 // ---------------------------------------------------------------------------
 
-/// Known environment variables per provider.
+/// Known environment variables per provider (expanded to match zeroclaw).
 const ENV_VAR_MAP: &[(&str, &str)] = &[
     ("openai", "OPENAI_API_KEY"),
     ("anthropic", "ANTHROPIC_API_KEY"),
@@ -14,38 +14,125 @@ const ENV_VAR_MAP: &[(&str, &str)] = &[
     ("deepseek", "DEEPSEEK_API_KEY"),
     ("groq", "GROQ_API_KEY"),
     ("together", "TOGETHER_API_KEY"),
+    ("together-ai", "TOGETHER_API_KEY"),
     ("siliconflow", "SILICONFLOW_API_KEY"),
     ("zhipuai", "ZHIPUAI_API_KEY"),
     ("fireworks", "FIREWORKS_API_KEY"),
+    ("fireworks-ai", "FIREWORKS_API_KEY"),
     ("nebius", "NEBIUS_API_KEY"),
     ("xai", "XAI_API_KEY"),
+    ("grok", "XAI_API_KEY"),
     ("openrouter", "OPENROUTER_API_KEY"),
     ("mistral", "MISTRAL_API_KEY"),
     ("huggingface", "HF_TOKEN"),
+    ("venice", "VENICE_API_KEY"),
+    ("perplexity", "PERPLEXITY_API_KEY"),
+    ("cohere", "COHERE_API_KEY"),
+    ("moonshot", "MOONSHOT_API_KEY"),
+    ("kimi", "MOONSHOT_API_KEY"),
+    ("glm", "GLM_API_KEY"),
+    ("zhipu", "GLM_API_KEY"),
+    ("minimax", "MINIMAX_API_KEY"),
+    ("qianfan", "QIANFAN_API_KEY"),
+    ("baidu", "QIANFAN_API_KEY"),
+    ("qwen", "DASHSCOPE_API_KEY"),
+    ("dashscope", "DASHSCOPE_API_KEY"),
+    ("qwen-intl", "DASHSCOPE_API_KEY"),
+    ("dashscope-intl", "DASHSCOPE_API_KEY"),
+    ("qwen-us", "DASHSCOPE_API_KEY"),
+    ("dashscope-us", "DASHSCOPE_API_KEY"),
+    ("zai", "ZAI_API_KEY"),
+    ("nvidia", "NVIDIA_API_KEY"),
+    ("nvidia-nim", "NVIDIA_API_KEY"),
+    ("build.nvidia.com", "NVIDIA_API_KEY"),
+    ("synthetic", "SYNTHETIC_API_KEY"),
+    ("opencode", "OPENCODE_API_KEY"),
+    ("opencode-zen", "OPENCODE_API_KEY"),
+    ("vercel", "VERCEL_API_KEY"),
+    ("vercel-ai", "VERCEL_API_KEY"),
+    ("cloudflare", "CLOUDFLARE_API_KEY"),
+    ("cloudflare-ai", "CLOUDFLARE_API_KEY"),
+    ("cloudflare-ai-gateway", "CLOUDFLARE_API_KEY"),
+    ("github-copilot", "GITHUB_COPILOT_API_KEY"),
+    ("amazon-bedrock", "AWS_ACCESS_KEY_ID"),
 ];
+
+/// Return provider-specific env var names for resolution (zeroclaw order).
+fn provider_env_candidates(name: &str) -> &'static [&'static str] {
+    match name {
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "venice" => &["VENICE_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "xai" | "grok" => &["XAI_API_KEY"],
+        "together" | "together-ai" => &["TOGETHER_API_KEY"],
+        "fireworks" | "fireworks-ai" => &["FIREWORKS_API_KEY"],
+        "perplexity" => &["PERPLEXITY_API_KEY"],
+        "cohere" => &["COHERE_API_KEY"],
+        "moonshot" | "kimi" => &["MOONSHOT_API_KEY"],
+        "glm" | "zhipu" | "zhipuai" => &["GLM_API_KEY", "ZHIPUAI_API_KEY"],
+        "minimax" => &["MINIMAX_API_KEY"],
+        "qianfan" | "baidu" => &["QIANFAN_API_KEY"],
+        "qwen" | "dashscope" | "qwen-intl" | "dashscope-intl" | "qwen-us" | "dashscope-us" => {
+            &["DASHSCOPE_API_KEY"]
+        }
+        "zai" | "z.ai" => &["ZAI_API_KEY"],
+        "nvidia" | "nvidia-nim" | "build.nvidia.com" => &["NVIDIA_API_KEY"],
+        "synthetic" => &["SYNTHETIC_API_KEY"],
+        "opencode" | "opencode-zen" => &["OPENCODE_API_KEY"],
+        "vercel" | "vercel-ai" => &["VERCEL_API_KEY"],
+        "cloudflare" | "cloudflare-ai" | "cloudflare-ai-gateway" => &["CLOUDFLARE_API_KEY"],
+        "google" => &["GEMINI_API_KEY"],
+        "huggingface" => &["HF_TOKEN"],
+        "siliconflow" => &["SILICONFLOW_API_KEY"],
+        "nebius" => &["NEBIUS_API_KEY"],
+        "github-copilot" => &["GITHUB_COPILOT_API_KEY"],
+        "amazon-bedrock" => &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+        _ => &[],
+    }
+}
+
+/// Resolve API key for a provider. Resolution order (same as zeroclaw):
+/// 1. Explicit override (trimmed, ignored if empty)
+/// 2. Provider-specific environment variable(s)
+/// 3. Generic fallback: ZEROAI_API_KEY, API_KEY
+///
+/// Does not include file-based credentials; use `sniff_external_credential` for that.
+pub fn resolve_credential(provider_name: &str, override_key: Option<&str>) -> Option<String> {
+    if let Some(raw) = override_key {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+
+    for &env_var in provider_env_candidates(provider_name) {
+        if let Ok(val) = std::env::var(env_var) {
+            let val = val.trim();
+            if !val.is_empty() {
+                return Some(val.to_owned());
+            }
+        }
+    }
+
+    for &env_var in &["ZEROAI_API_KEY", "API_KEY"] {
+        if let Ok(val) = std::env::var(env_var) {
+            let val = val.trim();
+            if !val.is_empty() {
+                return Some(val.to_owned());
+            }
+        }
+    }
+
+    None
+}
 
 /// Try to get an API key from environment variables for the given provider.
 pub fn env_api_key(provider_id: &str) -> Option<String> {
-    // Special case: Anthropic uses ANTHROPIC_API_KEY only (OAuth removed)
-    if provider_id == "anthropic" {
-        if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
-        return None;
-    }
-
-    for (prov, env_var) in ENV_VAR_MAP {
-        if *prov == provider_id {
-            if let Ok(val) = std::env::var(env_var) {
-                if !val.is_empty() {
-                    return Some(val);
-                }
-            }
-        }
-    }
-    None
+    resolve_credential(provider_id, None)
 }
 
 /// Returns all environment variable mappings: (provider_id, env_var_name).

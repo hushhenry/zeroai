@@ -1,8 +1,10 @@
 pub mod anthropic;
+pub mod compatible;
 pub mod google;
 pub mod google_gemini_cli;
 pub mod openai;
 pub mod retry;
+pub mod sanitize;
 
 use crate::types::{AssistantMessage, ChatContext, ModelDef, RequestOptions, StreamEvent};
 use async_trait::async_trait;

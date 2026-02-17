@@ -1,3 +1,4 @@
+use super::sanitize;
 use super::{Provider, ProviderError};
 use crate::types::*;
 use async_trait::async_trait;
@@ -218,7 +219,8 @@ impl Provider for AnthropicProvider {
             };
             let status = resp.status();
             if !status.is_success() {
-                yield Err(ProviderError::Http { status: status.as_u16(), body: resp.text().await.unwrap_or_default() });
+                let body = resp.text().await.unwrap_or_default();
+                yield Err(ProviderError::Http { status: status.as_u16(), body: sanitize::sanitize_api_error(&body) });
                 return;
             }
             yield Ok(StreamEvent::Start);
@@ -385,9 +387,10 @@ impl Provider for AnthropicProvider {
         let resp = req.json(&req_body).send().await?;
         let status = resp.status();
         if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Http {
                 status: status.as_u16(),
-                body: resp.text().await.unwrap_or_default(),
+                body: sanitize::sanitize_api_error(&body),
             });
         }
 

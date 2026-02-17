@@ -1,4 +1,6 @@
+use crate::auth::sniff;
 use crate::mapper::{join_model_id, split_model_id};
+use crate::providers::compatible::{AuthStyle, OpenAiCompatibleProvider};
 use crate::providers::retry::{self, compute_backoff, is_non_retryable};
 use crate::providers::{Provider, ProviderError};
 use crate::providers::google_gemini_cli::GoogleGeminiCliProvider;
@@ -134,14 +136,24 @@ impl AiClient {
     }
 }
 
+/// Custom provider registration for build().
+struct CustomProviderReg {
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    models_url: Option<String>,
+}
+
 pub struct AiClientBuilder {
     models: HashMap<String, ModelDef>,
+    custom_providers: Vec<CustomProviderReg>,
 }
 
 impl AiClientBuilder {
     pub fn new() -> Self {
         Self {
             models: HashMap::new(),
+            custom_providers: Vec::new(),
         }
     }
 
@@ -155,6 +167,47 @@ impl AiClientBuilder {
     /// `provider/id` fields on the `ModelDef`.
     pub fn with_models(mut self, models: impl IntoIterator<Item = (String, ModelDef)>) -> Self {
         self.models.extend(models);
+        self
+    }
+
+    /// Add an OpenAI-compatible custom provider with a fixed list of models.
+    pub fn with_custom_provider(
+        mut self,
+        name: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        models: Vec<ModelDef>,
+    ) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        for mut def in models {
+            def.provider = name.to_string();
+            def.base_url = base_url.clone();
+            let full_id = format!("{}/{}", name, def.id);
+            self.models.insert(full_id, def);
+        }
+        self.custom_providers.push(CustomProviderReg {
+            name: name.to_string(),
+            base_url,
+            api_key: api_key.map(String::from),
+            models_url: None,
+        });
+        self
+    }
+
+    /// Add an OpenAI-compatible custom provider with dynamic model discovery via GET models_url.
+    pub fn with_custom_provider_with_models_url(
+        mut self,
+        name: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        models_url: &str,
+    ) -> Self {
+        self.custom_providers.push(CustomProviderReg {
+            name: name.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.map(String::from),
+            models_url: Some(models_url.to_string()),
+        });
         self
     }
 
@@ -191,6 +244,39 @@ impl AiClientBuilder {
         providers.insert("google".into(), Arc::new(GoogleProvider::new()) as Arc<dyn Provider>);
         providers.insert("gemini-cli".into(), Arc::new(GoogleGeminiCliProvider::new_gemini_cli()) as Arc<dyn Provider>);
         providers.insert("antigravity".into(), Arc::new(GoogleGeminiCliProvider::new_antigravity()) as Arc<dyn Provider>);
+
+        // Register custom providers (with_custom_provider / with_custom_provider_with_models_url)
+        for reg in &self.custom_providers {
+            let mut p = OpenAiCompatibleProvider::new(
+                &reg.name,
+                &reg.base_url,
+                reg.api_key.as_deref(),
+                AuthStyle::Bearer,
+            );
+            if let Some(ref url) = reg.models_url {
+                p = p.with_models_url(url);
+            }
+            providers.insert(reg.name.clone(), Arc::new(p) as Arc<dyn Provider>);
+        }
+
+        // Auto-create provider for "custom:https://..." model IDs
+        for full_id in self.models.keys() {
+            if let Some((provider_name, _)) = split_model_id(full_id) {
+                if provider_name.starts_with("custom:") && !providers.contains_key(provider_name) {
+                    let base_url = provider_name.strip_prefix("custom:").unwrap_or("").trim();
+                    if !base_url.is_empty() && (base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                        let api_key = sniff::resolve_credential(provider_name, None);
+                        let p = OpenAiCompatibleProvider::new(
+                            provider_name,
+                            base_url,
+                            api_key.as_deref(),
+                            AuthStyle::Bearer,
+                        );
+                        providers.insert(provider_name.to_string(), Arc::new(p) as Arc<dyn Provider>);
+                    }
+                }
+            }
+        }
 
         AiClient {
             providers,
