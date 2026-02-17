@@ -15,6 +15,10 @@ pub struct AppConfig {
     /// Enabled models: list of `<provider>/<model>` strings
     #[serde(default)]
     pub enabled_models: Vec<String>,
+
+    /// Custom OpenAI-compatible provider models URL (provider_id -> URL). Blank = use {base_url}/v1/models.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub provider_models_url: HashMap<String, String>,
 }
 
 /// Manages reading/writing the config file with safe atomic writes.
@@ -134,6 +138,26 @@ impl ConfigManager {
     pub fn get_enabled_models(&self) -> anyhow::Result<Vec<String>> {
         let config = self.load()?;
         Ok(config.enabled_models)
+    }
+
+    /// Get custom models URL for a provider (for OpenAI-compatible custom providers).
+    pub fn get_models_url(&self, provider_id: &str) -> anyhow::Result<Option<String>> {
+        let config = self.load()?;
+        Ok(config.provider_models_url.get(provider_id).cloned())
+    }
+
+    /// Set custom models URL for a provider.
+    pub fn set_models_url(&self, provider_id: &str, url: Option<&str>) -> anyhow::Result<()> {
+        let mut config = self.load()?;
+        match url {
+            Some(u) if !u.trim().is_empty() => {
+                config.provider_models_url.insert(provider_id.to_string(), u.trim().to_string());
+            }
+            _ => {
+                config.provider_models_url.remove(provider_id);
+            }
+        }
+        self.save(&config)
     }
 
     /// Add models to the enabled list (dedup).

@@ -4,7 +4,7 @@ use zeroai::{
         self, AuthMethod, Credential, ApiKeyCredential, SetupTokenCredential,
         ProviderAuthInfo,
     },
-    models::static_models::static_models_for_provider,
+    models::{fetch_models_for_provider, is_custom_provider},
     oauth::{
         google_antigravity::AntigravityOAuthProvider,
         google_gemini_cli::GeminiCliOAuthProvider,
@@ -45,7 +45,14 @@ enum Screen {
     ProviderGroups,
     SubProviders(usize),
     AuthInput(AuthInputState),
+    ModelsUrlInput(ModelsUrlInputState),
     ModelSelect(ModelSelectState),
+}
+
+struct ModelsUrlInputState {
+    provider_id: String,
+    base_url: String,
+    input: String,
 }
 
 struct AuthInputState {
@@ -61,6 +68,8 @@ struct ModelSelectState {
     provider_id: String,
     models: Vec<(String, bool)>, // (full_model_id, selected)
     list_state: ListState,
+    /// Shown when fetch_models_for_provider failed (user can continue with empty list).
+    error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,9 +255,44 @@ async fn run_tui_loop(
                                             });
                                             config.set_credential(&provider_id, cred)?;
                                         }
-                                        enter_model_selection(&config, &provider_id, screen).await?;
+                                        if is_custom_provider(&provider_id) {
+                                            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
+                                            let input_url = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+                                            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
+                                                provider_id: provider_id.clone(),
+                                                base_url: base_url.to_string(),
+                                                input: input_url,
+                                            });
+                                        } else {
+                                            enter_model_selection(&config, &provider_id, screen).await?;
+                                        }
                                     }
                                 }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Screen::ModelsUrlInput(state) => {
+                        match key.code {
+                            KeyCode::Esc => {
+                                *screen = Screen::ProviderGroups;
+                            }
+                            KeyCode::Enter => {
+                                let pid = state.provider_id.clone();
+                                let url_opt = if state.input.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(state.input.trim().to_string())
+                                };
+                                let _ = config.set_models_url(&pid, url_opt.as_deref());
+                                *screen = Screen::ProviderGroups;
+                                enter_model_selection(&config, &pid, screen).await?;
+                            }
+                            KeyCode::Backspace => {
+                                state.input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                state.input.push(c);
                             }
                             _ => {}
                         }
@@ -310,7 +354,17 @@ async fn run_tui_loop(
             }
         }
         if let Some(pid) = next_provider_id {
-            enter_model_selection(&config, &pid, screen).await?;
+            if is_custom_provider(&pid) {
+                let base_url = pid.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
+                let input_url = config.get_models_url(&pid).ok().flatten().unwrap_or_default();
+                *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
+                    provider_id: pid.clone(),
+                    base_url: base_url.to_string(),
+                    input: input_url,
+                });
+            } else {
+                enter_model_selection(&config, &pid, screen).await?;
+            }
         }
     }
 }
@@ -324,17 +378,47 @@ async fn handle_provider_select(
     let provider_id = prov.provider_id.clone();
 
     if config.has_credential(&provider_id).unwrap_or(false) {
+        if is_custom_provider(&provider_id) {
+            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
+            let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
+                provider_id: provider_id.clone(),
+                base_url: base_url.to_string(),
+                input,
+            });
+            return Ok(());
+        }
         return enter_model_selection(&config, &provider_id, screen).await;
     }
 
     if let Some(cred) = auth::sniff::sniff_external_credential(&provider_id) {
         config.set_credential(&provider_id, cred)?;
+        if is_custom_provider(&provider_id) {
+            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
+            let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
+                provider_id: provider_id.clone(),
+                base_url: base_url.to_string(),
+                input,
+            });
+            return Ok(());
+        }
         return enter_model_selection(&config, &provider_id, screen).await;
     }
 
     if let Some(key) = auth::sniff::env_api_key(&provider_id) {
         let cred = Credential::ApiKey(ApiKeyCredential { key });
         config.set_credential(&provider_id, cred)?;
+        if is_custom_provider(&provider_id) {
+            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
+            let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
+                provider_id: provider_id.clone(),
+                base_url: base_url.to_string(),
+                input,
+            });
+            return Ok(());
+        }
         return enter_model_selection(&config, &provider_id, screen).await;
     }
 
@@ -399,7 +483,22 @@ async fn handle_provider_select(
 }
 
 async fn enter_model_selection(config: &ConfigManager, provider_id: &str, screen: &mut Screen) -> anyhow::Result<()> {
-    let models = static_models_for_provider(provider_id).into_iter().map(|m| m.id).collect::<Vec<_>>();
+    let api_key = config.resolve_api_key(provider_id).await.ok().flatten();
+    let models_url = config.get_models_url(provider_id).ok().flatten();
+    let models = match fetch_models_for_provider(provider_id, api_key.as_deref(), models_url.as_deref()).await {
+        Ok(list) => list.into_iter().map(|m| m.id).collect::<Vec<_>>(),
+        Err(e) => {
+            let _enabled = config.get_enabled_models().unwrap_or_default();
+            let ls = ListState::default();
+            *screen = Screen::ModelSelect(ModelSelectState {
+                provider_id: provider_id.to_string(),
+                models: Vec::new(),
+                list_state: ls,
+                error: Some(e.to_string()),
+            });
+            return Ok(());
+        }
+    };
     let enabled = config.get_enabled_models().unwrap_or_default();
     let model_items: Vec<(String, bool)> = models
         .into_iter()
@@ -410,11 +509,14 @@ async fn enter_model_selection(config: &ConfigManager, provider_id: &str, screen
         })
         .collect();
     let mut ls = ListState::default();
-    if !model_items.is_empty() { ls.select(Some(0)); }
+    if !model_items.is_empty() {
+        ls.select(Some(0));
+    }
     *screen = Screen::ModelSelect(ModelSelectState {
         provider_id: provider_id.to_string(),
         models: model_items,
         list_state: ls,
+        error: None,
     });
     Ok(())
 }
@@ -533,16 +635,37 @@ fn draw(
                 f.render_widget(info_para, chunks[2]);
             }
         }
+        Screen::ModelsUrlInput(state) => {
+            let hint = format!(
+                "For custom OpenAI-compatible providers, enter models_url (or leave blank for {}/v1/models)",
+                state.base_url
+            );
+            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(2)]).split(area);
+            f.render_widget(
+                Paragraph::new(hint).block(Block::default().borders(Borders::ALL)),
+                chunks[0],
+            );
+            let input_title = Line::from(vec![
+                Span::raw(" URL ("),
+                Span::styled("Enter", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" confirm, "),
+                Span::styled("Esc", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" cancel) "),
+            ]);
+            f.render_widget(
+                Paragraph::new(state.input.clone()).block(Block::default().borders(Borders::ALL).title(input_title)),
+                chunks[1],
+            );
+        }
         Screen::ModelSelect(state) => {
             let items: Vec<ListItem> = state.models.iter().map(|(id, selected)| {
-                let (marker, style) = if *selected { 
-                    ("[x]", Style::default().fg(COLOR_GREEN)) 
-                } else { 
-                    ("[ ]", Style::default().fg(Color::White)) 
+                let (marker, style) = if *selected {
+                    ("[x]", Style::default().fg(COLOR_GREEN))
+                } else {
+                    ("[ ]", Style::default().fg(Color::White))
                 };
                 ListItem::new(Span::styled(format!(" {} {}", marker, id), style))
             }).collect();
-            
             let title = Line::from(vec![
                 Span::raw(" Models ("),
                 Span::styled("Space", Style::default().fg(COLOR_YELLOW)),
@@ -552,12 +675,21 @@ fn draw(
                 Span::styled("Enter", Style::default().fg(COLOR_YELLOW)),
                 Span::raw(" confirm) "),
             ]);
-            
             let list = List::new(items)
                 .block(Block::default().title(title).borders(Borders::ALL))
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            let mut ls = state.list_state.clone();
-            f.render_stateful_widget(list, area, &mut ls);
+            if let Some(err) = &state.error {
+                let chunks = Layout::vertical([Constraint::Min(2), Constraint::Min(5)]).split(area);
+                f.render_widget(
+                    Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+                    chunks[0],
+                );
+                let mut ls = state.list_state.clone();
+                f.render_stateful_widget(list, chunks[1], &mut ls);
+            } else {
+                let mut ls = state.list_state.clone();
+                f.render_stateful_widget(list, area, &mut ls);
+            }
         }
     }
 }
