@@ -2,7 +2,7 @@ use zeroai::{
     ConfigManager,
     auth::{
         self, AuthMethod, Credential, ApiKeyCredential, SetupTokenCredential,
-        ProviderAuthInfo,
+        ProviderAuthInfo, config::Account,
     },
     models::{fetch_models_for_provider, is_custom_provider},
     oauth::{
@@ -47,6 +47,8 @@ enum Screen {
     AuthInput(AuthInputState),
     ModelsUrlInput(ModelsUrlInputState),
     ModelSelect(ModelSelectState),
+    AccountList(AccountListState),
+    AccountLabelInput(AccountLabelInputState),
 }
 
 struct ModelsUrlInputState {
@@ -64,6 +66,7 @@ struct AuthInputState {
     hint: String,
     is_oauth: bool,
     oauth_url: Option<String>,
+    is_add: bool,
 }
 
 struct ModelSelectState {
@@ -72,6 +75,19 @@ struct ModelSelectState {
     list_state: ListState,
     /// Shown when fetch_models_for_provider failed (user can continue with empty list).
     error: Option<String>,
+}
+
+struct AccountListState {
+    provider_id: String,
+    provider_label: String,
+    accounts: Vec<Account>,
+    list_state: ListState,
+}
+
+struct AccountLabelInputState {
+    provider_id: String,
+    account_id: String,
+    input: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +201,7 @@ async fn run_tui_loop(
                                         let (_, providers) = &groups[idx];
                                         if providers.len() == 1 {
                                             let prov = &providers[0];
-                                            handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
+                                            enter_account_list(config.clone(), prov, screen)?;
                                         } else {
                                             sub_state.select(Some(0));
                                             *screen = Screen::SubProviders(idx);
@@ -216,9 +232,124 @@ async fn run_tui_loop(
                                 if let Some(idx) = sub_state.selected() {
                                     if idx < providers.len() {
                                         let prov = &providers[idx];
-                                        handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone()).await?;
+                                        enter_account_list(config.clone(), prov, screen)?;
                                     }
                                 }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Screen::AccountList(state) => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                *screen = Screen::ProviderGroups;
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                let i = state.list_state.selected().unwrap_or(0);
+                                let next = if i == 0 { state.accounts.len().saturating_sub(1) } else { i - 1 };
+                                state.list_state.select(Some(next));
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let i = state.list_state.selected().unwrap_or(0);
+                                let next = if i + 1 >= state.accounts.len() { 0 } else { i + 1 };
+                                state.list_state.select(Some(next));
+                            }
+                            KeyCode::Char('a') => {
+                                let prov_info = groups.iter().flat_map(|(_, ps)| ps).find(|p| p.provider_id == state.provider_id);
+                                if let Some(prov) = prov_info {
+                                    handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone(), true).await?;
+                                }
+                            }
+                            KeyCode::Char('d') => {
+                                if let Some(idx) = state.list_state.selected() {
+                                    if idx < state.accounts.len() {
+                                        config.remove_account(&state.provider_id, &state.accounts[idx].id)?;
+                                        state.accounts = config.list_accounts(&state.provider_id)?;
+                                        if state.accounts.is_empty() {
+                                            state.list_state.select(None);
+                                        } else if idx >= state.accounts.len() {
+                                            state.list_state.select(Some(state.accounts.len() - 1));
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('e') => {
+                                if let Some(idx) = state.list_state.selected() {
+                                    if idx < state.accounts.len() {
+                                        let acc = &state.accounts[idx];
+                                        *screen = Screen::AccountLabelInput(AccountLabelInputState {
+                                            provider_id: state.provider_id.clone(),
+                                            account_id: acc.id.clone(),
+                                            input: acc.label.clone().unwrap_or_default(),
+                                        });
+                                    }
+                                }
+                            }
+                            KeyCode::Char('K') => {
+                                if let Some(idx) = state.list_state.selected() {
+                                    if idx > 0 {
+                                        config.move_account_up(&state.provider_id, &state.accounts[idx].id)?;
+                                        state.accounts = config.list_accounts(&state.provider_id)?;
+                                        state.list_state.select(Some(idx - 1));
+                                    }
+                                }
+                            }
+                            KeyCode::Char('J') => {
+                                if let Some(idx) = state.list_state.selected() {
+                                    if idx + 1 < state.accounts.len() {
+                                        config.move_account_down(&state.provider_id, &state.accounts[idx].id)?;
+                                        state.accounts = config.list_accounts(&state.provider_id)?;
+                                        state.list_state.select(Some(idx + 1));
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(idx) = state.list_state.selected() {
+                                    if idx < state.accounts.len() {
+                                        let pid = state.provider_id.clone();
+                                        let aid = state.accounts[idx].id.clone();
+                                        config.use_account(&pid, &aid)?;
+                                        enter_model_selection(&config, &pid, screen).await?;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Screen::AccountLabelInput(state) => {
+                        match key.code {
+                            KeyCode::Esc => {
+                                let accounts = config.list_accounts(&state.provider_id)?;
+                                let mut ls = ListState::default();
+                                if let Some(pos) = accounts.iter().position(|a| a.id == state.account_id) {
+                                    ls.select(Some(pos));
+                                }
+                                *screen = Screen::AccountList(AccountListState {
+                                    provider_id: state.provider_id.clone(),
+                                    provider_label: String::new(),
+                                    accounts,
+                                    list_state: ls,
+                                });
+                            }
+                            KeyCode::Char(c) => {
+                                state.input.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                state.input.pop();
+                            }
+                            KeyCode::Enter => {
+                                config.set_account_label(&state.provider_id, &state.account_id, Some(state.input.clone()))?;
+                                let accounts = config.list_accounts(&state.provider_id)?;
+                                let mut ls = ListState::default();
+                                if let Some(pos) = accounts.iter().position(|a| a.id == state.account_id) {
+                                    ls.select(Some(pos));
+                                }
+                                *screen = Screen::AccountList(AccountListState {
+                                    provider_id: state.provider_id.clone(),
+                                    provider_label: String::new(),
+                                    accounts,
+                                    list_state: ls,
+                                });
                             }
                             _ => {}
                         }
@@ -246,17 +377,22 @@ async fn run_tui_loop(
                                         let input = state.input.trim().to_string();
                                         let is_setup = state.hint.contains("setup-token");
 
-                                        if is_setup {
-                                            let cred = Credential::SetupToken(SetupTokenCredential {
+                                        let cred = if is_setup {
+                                            Credential::SetupToken(SetupTokenCredential {
                                                 token: input,
-                                            });
-                                            config.set_credential(&provider_id, cred)?;
+                                            })
                                         } else {
-                                            let cred = Credential::ApiKey(ApiKeyCredential {
+                                            Credential::ApiKey(ApiKeyCredential {
                                                 key: input,
-                                            });
+                                            })
+                                        };
+                                        
+                                        if state.is_add {
+                                            config.add_account(&provider_id, None, cred)?;
+                                        } else {
                                             config.set_credential(&provider_id, cred)?;
                                         }
+
                                         if is_custom_provider(&provider_id) {
                                             let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
                                             let input_url = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
@@ -358,7 +494,7 @@ async fn run_tui_loop(
         let mut next_provider_id = None;
         if let Screen::AuthInput(state) = screen {
             if state.is_oauth {
-                if config.has_credential(&state.provider_id).unwrap_or(false) {
+                if config.has_credential(&state.provider_id).unwrap_or(false) && !state.is_add {
                     next_provider_id = Some(state.provider_id.clone());
                 } else {
                     let info = oauth_callbacks.auth_info.lock().unwrap();
@@ -388,60 +524,64 @@ async fn run_tui_loop(
     }
 }
 
+fn enter_account_list(config: ConfigManager, prov: &ProviderAuthInfo, screen: &mut Screen) -> anyhow::Result<()> {
+    let accounts = config.list_accounts(&prov.provider_id)?;
+    if accounts.is_empty() {
+        // Just go to add account directly if empty? No, show empty list so they can press 'a'
+        *screen = Screen::AccountList(AccountListState {
+            provider_id: prov.provider_id.clone(),
+            provider_label: prov.label.clone(),
+            accounts: Vec::new(),
+            list_state: ListState::default(),
+        });
+    } else {
+        let mut ls = ListState::default();
+        ls.select(Some(0));
+        *screen = Screen::AccountList(AccountListState {
+            provider_id: prov.provider_id.clone(),
+            provider_label: prov.label.clone(),
+            accounts,
+            list_state: ls,
+        });
+    }
+    Ok(())
+}
+
 async fn handle_provider_select(
     config: ConfigManager,
     prov: &ProviderAuthInfo,
     screen: &mut Screen,
     callbacks: Arc<TuiOAuthCallbacks>,
+    is_add: bool,
 ) -> anyhow::Result<()> {
     let provider_id = prov.provider_id.clone();
 
-    if config.has_credential(&provider_id).unwrap_or(false) {
-        if is_custom_provider(&provider_id) {
-            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
-            let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
-            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
-                provider_id: provider_id.clone(),
-                base_url: base_url.to_string(),
-                input,
-                auth_error: None,
-            });
-            return Ok(());
+    if !is_add {
+        if config.has_credential(&provider_id).unwrap_or(false) {
+            if is_custom_provider(&provider_id) {
+                let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
+                let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+                *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
+                    provider_id: provider_id.clone(),
+                    base_url: base_url.to_string(),
+                    input,
+                    auth_error: None,
+                });
+                return Ok(());
+            }
+            return enter_model_selection(&config, &provider_id, screen).await;
         }
-        return enter_model_selection(&config, &provider_id, screen).await;
-    }
 
-    if let Some(cred) = auth::sniff::sniff_external_credential(&provider_id) {
-        config.set_credential(&provider_id, cred)?;
-        if is_custom_provider(&provider_id) {
-            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
-            let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
-            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
-                provider_id: provider_id.clone(),
-                base_url: base_url.to_string(),
-                input,
-                auth_error: None,
-            });
-            return Ok(());
+        if let Some(cred) = auth::sniff::sniff_external_credential(&provider_id) {
+            config.set_credential(&provider_id, cred)?;
+            return enter_model_selection(&config, &provider_id, screen).await;
         }
-        return enter_model_selection(&config, &provider_id, screen).await;
-    }
 
-    if let Some(key) = auth::sniff::env_api_key(&provider_id) {
-        let cred = Credential::ApiKey(ApiKeyCredential { key });
-        config.set_credential(&provider_id, cred)?;
-        if is_custom_provider(&provider_id) {
-            let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
-            let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
-            *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
-                provider_id: provider_id.clone(),
-                base_url: base_url.to_string(),
-                input,
-                auth_error: None,
-            });
-            return Ok(());
+        if let Some(key) = auth::sniff::env_api_key(&provider_id) {
+            let cred = Credential::ApiKey(ApiKeyCredential { key });
+            config.set_credential(&provider_id, cred)?;
+            return enter_model_selection(&config, &provider_id, screen).await;
         }
-        return enter_model_selection(&config, &provider_id, screen).await;
     }
 
     let method = prov.auth_methods.first().cloned().unwrap_or(AuthMethod::ApiKey {
@@ -458,6 +598,7 @@ async fn handle_provider_select(
                 hint: hint.unwrap_or_default(),
                 is_oauth: false,
                 oauth_url: None,
+                is_add,
             });
         }
         AuthMethod::SetupToken { hint } => {
@@ -468,6 +609,7 @@ async fn handle_provider_select(
                 hint: hint.unwrap_or_else(|| "Run `claude setup-token` to generate".into()),
                 is_oauth: false,
                 oauth_url: None,
+                is_add,
             });
         }
         AuthMethod::OAuth { hint } => {
@@ -483,12 +625,17 @@ async fn handle_provider_select(
                     _ => return,
                 };
                 if let Ok(creds) = oauth_provider.login(&*callbacks).await {
-                    let _ = config_mgr.set_credential(&pid, Credential::OAuth(zeroai::auth::OAuthCredential {
+                    let cred = Credential::OAuth(zeroai::auth::OAuthCredential {
                         refresh: creds.refresh,
                         access: creds.access,
                         expires: creds.expires,
                         extra: creds.extra,
-                    }));
+                    });
+                    if is_add {
+                        let _ = config_mgr.add_account(&pid, None, cred);
+                    } else {
+                        let _ = config_mgr.set_credential(&pid, cred);
+                    }
                 }
             });
             *screen = Screen::AuthInput(AuthInputState {
@@ -498,6 +645,7 @@ async fn handle_provider_select(
                 hint: hint.unwrap_or_else(|| "Connecting to Google...".into()),
                 is_oauth: true,
                 oauth_url: None,
+                is_add,
             });
         }
     }
@@ -616,6 +764,52 @@ fn draw(
                 .block(Block::default().title(title).borders(Borders::ALL))
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
             f.render_stateful_widget(list, area, sub_state);
+        }
+        Screen::AccountList(state) => {
+            let items: Vec<ListItem> = state.accounts.iter().enumerate().map(|(i, acc)| {
+                let marker = if i == 0 { "★" } else { " " };
+                let now = chrono::Utc::now().timestamp_millis();
+                let color = if acc.is_healthy_at(now) { COLOR_GREEN } else { Color::Red };
+                
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", marker), Style::default().fg(COLOR_YELLOW)),
+                    Span::styled(acc.display_label(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::raw(" - "),
+                    Span::styled(format!("ID: {}", &acc.id[..8]), Style::default().fg(COLOR_GRAY)),
+                ]))
+            }).collect();
+
+            let title = Line::from(vec![
+                Span::raw(format!(" {} Accounts (", state.provider_label)),
+                Span::styled("Enter", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" use, "),
+                Span::styled("a", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" add, "),
+                Span::styled("e", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" label, "),
+                Span::styled("d", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" del, "),
+                Span::styled("K/J", Style::default().fg(COLOR_YELLOW)),
+                Span::raw(" move) "),
+            ]);
+
+            let list = List::new(items)
+                .block(Block::default().title(title).borders(Borders::ALL))
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            
+            let mut ls = state.list_state.clone();
+            f.render_stateful_widget(list, area, &mut ls);
+        }
+        Screen::AccountLabelInput(state) => {
+            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(2)]).split(area);
+            f.render_widget(
+                Paragraph::new("Enter new label for account:").block(Block::default().borders(Borders::ALL)),
+                chunks[0],
+            );
+            f.render_widget(
+                Paragraph::new(state.input.as_str()).block(Block::default().borders(Borders::ALL).title("Label (Enter to confirm, Esc to cancel)")),
+                chunks[1],
+            );
         }
         Screen::AuthInput(state) => {
             let has_info = !state.hint.is_empty() || state.oauth_url.is_some();

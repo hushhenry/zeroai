@@ -27,6 +27,10 @@ impl Account {
     pub fn is_healthy_at(&self, now_ms: i64) -> bool {
         self.unhealthy_until_ms.unwrap_or(0) <= now_ms
     }
+
+    pub fn display_label(&self) -> String {
+        self.label.clone().unwrap_or_else(|| format!("account-{}", &self.id[..4]))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -202,6 +206,18 @@ impl ConfigManager {
             .or_insert_with(ProviderAccounts::default)
     }
 
+    fn mirror_first_to_legacy(cfg: &mut AppConfig, provider_id: &str) {
+        if let Some(pa) = cfg.provider_accounts.get(provider_id) {
+            if let Some(first) = pa.accounts.first() {
+                cfg.credentials.insert(provider_id.to_string(), first.credential.clone());
+            } else {
+                cfg.credentials.remove(provider_id);
+            }
+        } else {
+            cfg.credentials.remove(provider_id);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Multi-account operations
     // -----------------------------------------------------------------------
@@ -215,23 +231,26 @@ impl ConfigManager {
     ) -> anyhow::Result<String> {
         self.with_exclusive_lock(|| {
             let mut cfg = self.load_unlocked()?;
-            let accs = Self::ensure_accounts(&mut cfg, provider_id);
             let id = uuid::Uuid::new_v4().to_string();
-            accs.accounts.push(Account {
-                id: id.clone(),
-                label,
-                credential,
-                unhealthy_until_ms: None,
-                last_rate_limited_ms: None,
-            });
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                let next_index = accs.accounts.len() + 1;
+                let label = label.and_then(|s| {
+                    let t = s.trim().to_string();
+                    if t.is_empty() { None } else { Some(t) }
+                });
+                let label = label.or_else(|| Some(format!("account-{}", next_index)));
 
-            // Legacy field: keep first credential mirrored to avoid breaking older reads.
-            let legacy_first = accs.accounts.first().map(|a| a.credential.clone());
-            drop(accs);
-            if let Some(c) = legacy_first {
-                cfg.credentials.insert(provider_id.to_string(), c);
+                accs.accounts.push(Account {
+                    id: id.clone(),
+                    label,
+                    credential,
+                    unhealthy_until_ms: None,
+                    last_rate_limited_ms: None,
+                });
             }
 
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
             self.save_unlocked(&cfg)?;
             Ok(id)
         })
@@ -251,22 +270,18 @@ impl ConfigManager {
     pub fn use_account(&self, provider_id: &str, account_id: &str) -> anyhow::Result<()> {
         self.with_exclusive_lock(|| {
             let mut cfg = self.load_unlocked()?;
-            let accs = Self::ensure_accounts(&mut cfg, provider_id);
-
-            if let Some(pos) = accs.accounts.iter().position(|a| a.id == account_id) {
-                if pos != 0 {
-                    let a = accs.accounts.remove(pos);
-                    accs.accounts.insert(0, a);
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if let Some(pos) = accs.accounts.iter().position(|a| a.id == account_id) {
+                    if pos != 0 {
+                        let a = accs.accounts.remove(pos);
+                        accs.accounts.insert(0, a);
+                    }
+                } else {
+                    anyhow::bail!("account not found: {}", account_id);
                 }
-            } else {
-                anyhow::bail!("account not found: {}", account_id);
             }
-
-            let legacy_first = accs.accounts.first().map(|a| a.credential.clone());
-            drop(accs);
-            if let Some(c) = legacy_first {
-                cfg.credentials.insert(provider_id.to_string(), c);
-            }
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
             self.save_unlocked(&cfg)
         })
     }
@@ -275,25 +290,15 @@ impl ConfigManager {
     pub fn remove_account(&self, provider_id: &str, account_id: &str) -> anyhow::Result<()> {
         self.with_exclusive_lock(|| {
             let mut cfg = self.load_unlocked()?;
-            let accs = Self::ensure_accounts(&mut cfg, provider_id);
-            let before = accs.accounts.len();
-            accs.accounts.retain(|a| a.id != account_id);
-            if accs.accounts.len() == before {
-                anyhow::bail!("account not found: {}", account_id);
-            }
-
-            // Mirror first to legacy map.
-            let legacy_first = accs.accounts.first().map(|a| a.credential.clone());
-            drop(accs);
-            match legacy_first {
-                Some(c) => {
-                    cfg.credentials.insert(provider_id.to_string(), c);
-                }
-                None => {
-                    cfg.credentials.remove(provider_id);
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                let before = accs.accounts.len();
+                accs.accounts.retain(|a| a.id != account_id);
+                if accs.accounts.len() == before {
+                    anyhow::bail!("account not found: {}", account_id);
                 }
             }
-
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
             self.save_unlocked(&cfg)
         })
     }
@@ -302,15 +307,64 @@ impl ConfigManager {
     pub fn rotate_first(&self, provider_id: &str) -> anyhow::Result<()> {
         self.with_exclusive_lock(|| {
             let mut cfg = self.load_unlocked()?;
-            let accs = Self::ensure_accounts(&mut cfg, provider_id);
-            if accs.accounts.len() >= 2 {
-                let first = accs.accounts.remove(0);
-                accs.accounts.push(first);
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if accs.accounts.len() >= 2 {
+                    let first = accs.accounts.remove(0);
+                    accs.accounts.push(first);
+                }
             }
-            let legacy_first = accs.accounts.first().map(|a| a.credential.clone());
-            drop(accs);
-            if let Some(c) = legacy_first {
-                cfg.credentials.insert(provider_id.to_string(), c);
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
+            self.save_unlocked(&cfg)
+        })
+    }
+
+    pub fn move_account_up(&self, provider_id: &str, account_id: &str) -> anyhow::Result<()> {
+        self.with_exclusive_lock(|| {
+            let mut cfg = self.load_unlocked()?;
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if let Some(pos) = accs.accounts.iter().position(|a| a.id == account_id) {
+                    if pos > 0 {
+                        accs.accounts.swap(pos, pos - 1);
+                    }
+                } else {
+                    anyhow::bail!("account not found: {}", account_id);
+                }
+            }
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
+            self.save_unlocked(&cfg)
+        })
+    }
+
+    pub fn move_account_down(&self, provider_id: &str, account_id: &str) -> anyhow::Result<()> {
+        self.with_exclusive_lock(|| {
+            let mut cfg = self.load_unlocked()?;
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if let Some(pos) = accs.accounts.iter().position(|a| a.id == account_id) {
+                    if pos + 1 < accs.accounts.len() {
+                        accs.accounts.swap(pos, pos + 1);
+                    }
+                } else {
+                    anyhow::bail!("account not found: {}", account_id);
+                }
+            }
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
+            self.save_unlocked(&cfg)
+        })
+    }
+
+    pub fn set_account_label(&self, provider_id: &str, account_id: &str, label: Option<String>) -> anyhow::Result<()> {
+        self.with_exclusive_lock(|| {
+            let mut cfg = self.load_unlocked()?;
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if let Some(acc) = accs.accounts.iter_mut().find(|a| a.id == account_id) {
+                    acc.label = label.filter(|s| !s.trim().is_empty());
+                } else {
+                    anyhow::bail!("account not found: {}", account_id);
+                }
             }
             self.save_unlocked(&cfg)
         })
@@ -325,24 +379,21 @@ impl ConfigManager {
     ) -> anyhow::Result<()> {
         self.with_exclusive_lock(|| {
             let mut cfg = self.load_unlocked()?;
-            let accs = Self::ensure_accounts(&mut cfg, provider_id);
             let now = Self::now_ms();
             let until = now.saturating_add(backoff_ms as i64);
 
-            if let Some(pos) = accs.accounts.iter().position(|a| a.id == account_id) {
-                let mut a = accs.accounts.remove(pos);
-                a.unhealthy_until_ms = Some(until);
-                a.last_rate_limited_ms = Some(now);
-                accs.accounts.push(a);
-            } else {
-                anyhow::bail!("account not found: {}", account_id);
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if let Some(pos) = accs.accounts.iter().position(|a| a.id == account_id) {
+                    let mut a = accs.accounts.remove(pos);
+                    a.unhealthy_until_ms = Some(until);
+                    a.last_rate_limited_ms = Some(now);
+                    accs.accounts.push(a);
+                } else {
+                    anyhow::bail!("account not found: {}", account_id);
+                }
             }
-
-            let legacy_first = accs.accounts.first().map(|a| a.credential.clone());
-            drop(accs);
-            if let Some(c) = legacy_first {
-                cfg.credentials.insert(provider_id.to_string(), c);
-            }
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
             self.save_unlocked(&cfg)
         })
     }
@@ -421,15 +472,13 @@ impl ConfigManager {
                     // Persist refreshed token to the same account.
                     self.with_exclusive_lock(|| {
                         let mut cfg = self.load_unlocked()?;
-                        let accs = Self::ensure_accounts(&mut cfg, provider_id);
-                        if let Some(pos) = accs.accounts.iter().position(|a| a.id == chosen.id) {
-                            accs.accounts[pos].credential = chosen.credential.clone();
+                        {
+                            let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                            if let Some(pos) = accs.accounts.iter().position(|a| a.id == chosen.id) {
+                                accs.accounts[pos].credential = chosen.credential.clone();
+                            }
                         }
-                        let legacy_first = accs.accounts.first().map(|a| a.credential.clone());
-                        drop(accs);
-                        if let Some(c) = legacy_first {
-                            cfg.credentials.insert(provider_id.to_string(), c);
-                        }
+                        Self::mirror_first_to_legacy(&mut cfg, provider_id);
                         self.save_unlocked(&cfg)
                     })?;
                 }
@@ -501,19 +550,21 @@ impl ConfigManager {
     pub fn set_credential(&self, provider_id: &str, credential: Credential) -> anyhow::Result<()> {
         self.with_exclusive_lock(|| {
             let mut cfg = self.load_unlocked()?;
-            let accs = Self::ensure_accounts(&mut cfg, provider_id);
-            if let Some(first) = accs.accounts.first_mut() {
-                first.credential = credential.clone();
-            } else {
-                accs.accounts.push(Account {
-                    id: "default".into(),
-                    label: Some("default".into()),
-                    credential: credential.clone(),
-                    unhealthy_until_ms: None,
-                    last_rate_limited_ms: None,
-                });
+            {
+                let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                if let Some(first) = accs.accounts.first_mut() {
+                    first.credential = credential.clone();
+                } else {
+                    accs.accounts.push(Account {
+                        id: "default".into(),
+                        label: Some("default".into()),
+                        credential: credential.clone(),
+                        unhealthy_until_ms: None,
+                        last_rate_limited_ms: None,
+                    });
+                }
             }
-            cfg.credentials.insert(provider_id.to_string(), credential);
+            Self::mirror_first_to_legacy(&mut cfg, provider_id);
             self.save_unlocked(&cfg)
         })
     }
