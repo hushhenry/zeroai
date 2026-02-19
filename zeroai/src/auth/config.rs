@@ -234,12 +234,22 @@ impl ConfigManager {
             let id = uuid::Uuid::new_v4().to_string();
             {
                 let accs = Self::ensure_accounts(&mut cfg, provider_id);
+                // Generate provider-specific label based on existing accounts for this provider
                 let next_index = accs.accounts.len() + 1;
                 let label = label.and_then(|s| {
                     let t = s.trim().to_string();
                     if t.is_empty() { None } else { Some(t) }
                 });
-                let label = label.or_else(|| Some(format!("account-{}", next_index)));
+                // Auto-generate label using provider prefix for clarity (e.g., "openai-1", "gemini-cli-2")
+                let label = label.or_else(|| {
+                    let provider_prefix = provider_id
+                        .strip_prefix("custom:")
+                        .unwrap_or(provider_id)
+                        .split('/')
+                        .next()
+                        .unwrap_or(provider_id);
+                    Some(format!("{}-{}", provider_prefix, next_index))
+                });
 
                 accs.accounts.push(Account {
                     id: id.clone(),

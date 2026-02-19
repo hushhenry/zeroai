@@ -55,6 +55,7 @@ struct ModelsUrlInputState {
     provider_id: String,
     base_url: String,
     input: String,
+    cursor_pos: usize,
     /// Auth/test failure message; shown when fetch fails (don't save until fixed).
     auth_error: Option<String>,
 }
@@ -67,6 +68,7 @@ struct AuthInputState {
     is_oauth: bool,
     oauth_url: Option<String>,
     is_add: bool,
+    cursor_pos: usize,
 }
 
 struct ModelSelectState {
@@ -89,6 +91,7 @@ struct AccountLabelInputState {
     provider_label: String,
     account_id: String,
     input: String,
+    cursor_pos: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,11 +249,17 @@ async fn run_tui_loop(
                                 *screen = Screen::ProviderGroups;
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
+                                if state.accounts.is_empty() {
+                                    continue;
+                                }
                                 let i = state.list_state.selected().unwrap_or(0);
                                 let next = if i == 0 { state.accounts.len().saturating_sub(1) } else { i - 1 };
                                 state.list_state.select(Some(next));
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
+                                if state.accounts.is_empty() {
+                                    continue;
+                                }
                                 let i = state.list_state.selected().unwrap_or(0);
                                 let next = if i + 1 >= state.accounts.len() { 0 } else { i + 1 };
                                 state.list_state.select(Some(next));
@@ -269,7 +278,9 @@ async fn run_tui_loop(
                                         if state.accounts.is_empty() {
                                             state.list_state.select(None);
                                         } else if idx >= state.accounts.len() {
-                                            state.list_state.select(Some(state.accounts.len() - 1));
+                                            state.list_state.select(Some(state.accounts.len().saturating_sub(1)));
+                                        } else {
+                                            state.list_state.select(Some(idx));
                                         }
                                     }
                                 }
@@ -283,13 +294,15 @@ async fn run_tui_loop(
                                             provider_label: state.provider_label.clone(),
                                             account_id: acc.id.clone(),
                                             input: acc.label.clone().unwrap_or_default(),
+                                            cursor_pos: acc.label.as_ref().map(|s| s.len()).unwrap_or(0),
                                         });
                                     }
                                 }
                             }
                             KeyCode::Char('K') => {
+                                // Move account up (swap with previous)
                                 if let Some(idx) = state.list_state.selected() {
-                                    if idx > 0 {
+                                    if idx > 0 && !state.accounts.is_empty() {
                                         config.move_account_up(&state.provider_id, &state.accounts[idx].id)?;
                                         state.accounts = config.list_accounts(&state.provider_id)?;
                                         state.list_state.select(Some(idx - 1));
@@ -297,6 +310,7 @@ async fn run_tui_loop(
                                 }
                             }
                             KeyCode::Char('J') => {
+                                // Move account down (swap with next)
                                 if let Some(idx) = state.list_state.selected() {
                                     if idx + 1 < state.accounts.len() {
                                         config.move_account_down(&state.provider_id, &state.accounts[idx].id)?;
@@ -334,13 +348,41 @@ async fn run_tui_loop(
                                 });
                             }
                             KeyCode::Char(c) => {
-                                state.input.push(c);
+                                state.input.insert(state.cursor_pos, c);
+                                state.cursor_pos += 1;
                             }
                             KeyCode::Backspace => {
-                                state.input.pop();
+                                if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                    state.input.remove(state.cursor_pos);
+                                }
+                            }
+                            KeyCode::Delete => {
+                                if state.cursor_pos < state.input.len() {
+                                    state.input.remove(state.cursor_pos);
+                                }
+                            }
+                            KeyCode::Left => {
+                                if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if state.cursor_pos < state.input.len() {
+                                    state.cursor_pos += 1;
+                                }
+                            }
+                            KeyCode::Home => {
+                                state.cursor_pos = 0;
+                            }
+                            KeyCode::End => {
+                                state.cursor_pos = state.input.len();
                             }
                             KeyCode::Enter => {
-                                config.set_account_label(&state.provider_id, &state.account_id, Some(state.input.clone()))?;
+                                // Trim whitespace and only save if non-empty
+                                let trimmed = state.input.trim().to_string();
+                                let label = if trimmed.is_empty() { None } else { Some(trimmed) };
+                                config.set_account_label(&state.provider_id, &state.account_id, label)?;
                                 let accounts = config.list_accounts(&state.provider_id)?;
                                 let mut ls = ListState::default();
                                 if let Some(pos) = accounts.iter().position(|a| a.id == state.account_id) {
@@ -362,10 +404,35 @@ async fn run_tui_loop(
                                 *screen = Screen::ProviderGroups;
                             }
                             KeyCode::Char(c) => {
-                                state.input.push(c);
+                                state.input.insert(state.cursor_pos, c);
+                                state.cursor_pos += 1;
                             }
                             KeyCode::Backspace => {
-                                state.input.pop();
+                                if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                    state.input.remove(state.cursor_pos);
+                                }
+                            }
+                            KeyCode::Delete => {
+                                if state.cursor_pos < state.input.len() {
+                                    state.input.remove(state.cursor_pos);
+                                }
+                            }
+                            KeyCode::Left => {
+                                if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if state.cursor_pos < state.input.len() {
+                                    state.cursor_pos += 1;
+                                }
+                            }
+                            KeyCode::Home => {
+                                state.cursor_pos = 0;
+                            }
+                            KeyCode::End => {
+                                state.cursor_pos = state.input.len();
                             }
                             KeyCode::Enter => {
                                 if !state.input.is_empty() {
@@ -373,6 +440,7 @@ async fn run_tui_loop(
                                         let mut res = oauth_callbacks.prompt_result.lock().unwrap();
                                         *res = Some(state.input.trim().to_string());
                                         state.input.clear();
+                                        state.cursor_pos = 0;
                                         state.hint = "Exchanging code for token...".into();
                                     } else {
                                         let provider_id = state.provider_id.clone();
@@ -388,7 +456,7 @@ async fn run_tui_loop(
                                                 key: input,
                                             })
                                         };
-                                        
+
                                         if state.is_add {
                                             config.add_account(&provider_id, None, cred)?;
                                         } else {
@@ -398,10 +466,12 @@ async fn run_tui_loop(
                                         if is_custom_provider(&provider_id) {
                                             let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
                                             let input_url = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+                                            let cursor_pos = input_url.len();
                                             *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
                                                 provider_id: provider_id.clone(),
                                                 base_url: base_url.to_string(),
                                                 input: input_url,
+                                                cursor_pos,
                                                 auth_error: None,
                                             });
                                         } else {
@@ -444,11 +514,37 @@ async fn run_tui_loop(
                             }
                             KeyCode::Backspace => {
                                 state.auth_error = None;
-                                state.input.pop();
+                                if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                    state.input.remove(state.cursor_pos);
+                                }
+                            }
+                            KeyCode::Delete => {
+                                state.auth_error = None;
+                                if state.cursor_pos < state.input.len() {
+                                    state.input.remove(state.cursor_pos);
+                                }
+                            }
+                            KeyCode::Left => {
+                                if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if state.cursor_pos < state.input.len() {
+                                    state.cursor_pos += 1;
+                                }
+                            }
+                            KeyCode::Home => {
+                                state.cursor_pos = 0;
+                            }
+                            KeyCode::End => {
+                                state.cursor_pos = state.input.len();
                             }
                             KeyCode::Char(c) => {
                                 state.auth_error = None;
-                                state.input.push(c);
+                                state.input.insert(state.cursor_pos, c);
+                                state.cursor_pos += 1;
                             }
                             _ => {}
                         }
@@ -513,10 +609,12 @@ async fn run_tui_loop(
             if is_custom_provider(&pid) {
                 let base_url = pid.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
                 let input_url = config.get_models_url(&pid).ok().flatten().unwrap_or_default();
+                let cursor_pos = input_url.len();
                 *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
                     provider_id: pid.clone(),
                     base_url: base_url.to_string(),
                     input: input_url,
+                    cursor_pos,
                     auth_error: None,
                 });
             } else {
@@ -563,10 +661,12 @@ async fn handle_provider_select(
             if is_custom_provider(&provider_id) {
                 let base_url = provider_id.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
                 let input = config.get_models_url(&provider_id).ok().flatten().unwrap_or_default();
+                let cursor_pos = input.len();
                 *screen = Screen::ModelsUrlInput(ModelsUrlInputState {
                     provider_id: provider_id.clone(),
                     base_url: base_url.to_string(),
                     input,
+                    cursor_pos,
                     auth_error: None,
                 });
                 return Ok(());
@@ -601,6 +701,7 @@ async fn handle_provider_select(
                 is_oauth: false,
                 oauth_url: None,
                 is_add,
+                cursor_pos: 0,
             });
         }
         AuthMethod::SetupToken { hint } => {
@@ -612,6 +713,7 @@ async fn handle_provider_select(
                 is_oauth: false,
                 oauth_url: None,
                 is_add,
+                cursor_pos: 0,
             });
         }
         AuthMethod::OAuth { hint } => {
@@ -648,6 +750,7 @@ async fn handle_provider_select(
                 is_oauth: true,
                 oauth_url: None,
                 is_add,
+                cursor_pos: 0,
             });
         }
     }
@@ -808,24 +911,32 @@ fn draw(
                 Paragraph::new("Enter new label for account:").block(Block::default().borders(Borders::ALL)),
                 chunks[0],
             );
+            // Display input with cursor visualization
+            let (before, after) = state.input.split_at(state.cursor_pos);
+            let cursor_span = Span::styled(" ", Style::default().bg(COLOR_CYAN));
+            let line = Line::from(vec![
+                Span::raw(before),
+                cursor_span,
+                Span::raw(after),
+            ]);
             f.render_widget(
-                Paragraph::new(state.input.as_str()).block(Block::default().borders(Borders::ALL).title("Label (Enter to confirm, Esc to cancel)")),
+                Paragraph::new(line).block(Block::default().borders(Borders::ALL).title("Label (Enter to confirm, Esc to cancel)")),
                 chunks[1],
             );
         }
         Screen::AuthInput(state) => {
             let has_info = !state.hint.is_empty() || state.oauth_url.is_some();
             let mut constraints = vec![
-                Constraint::Length(3), 
-                Constraint::Length(3), 
+                Constraint::Length(3),
+                Constraint::Length(3),
             ];
             if has_info {
-                constraints.push(Constraint::Min(3)); 
+                constraints.push(Constraint::Min(3));
             }
             let chunks = Layout::vertical(constraints).split(area);
-            
+
             f.render_widget(Paragraph::new(state.label.as_str()).block(Block::default().borders(Borders::ALL)), chunks[0]);
-            
+
             let input_title = Line::from(vec![
                 Span::raw(" Input ("),
                 Span::styled("Enter", Style::default().fg(COLOR_YELLOW)),
@@ -833,7 +944,15 @@ fn draw(
                 Span::styled("Esc", Style::default().fg(COLOR_YELLOW)),
                 Span::raw(" cancel) "),
             ]);
-            f.render_widget(Paragraph::new(state.input.clone()).block(Block::default().borders(Borders::ALL).title(input_title)), chunks[1]);
+            // Display input with cursor visualization
+            let (before, after) = state.input.split_at(state.cursor_pos);
+            let cursor_span = Span::styled(" ", Style::default().bg(COLOR_CYAN));
+            let line = Line::from(vec![
+                Span::raw(before),
+                cursor_span,
+                Span::raw(after),
+            ]);
+            f.render_widget(Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(input_title)), chunks[1]);
 
             if has_info {
                 let mut info_content = vec![
@@ -875,8 +994,16 @@ fn draw(
                 Span::styled("Esc", Style::default().fg(COLOR_YELLOW)),
                 Span::raw(" cancel) "),
             ]);
+            // Display input with cursor visualization
+            let (before, after) = state.input.split_at(state.cursor_pos);
+            let cursor_span = Span::styled(" ", Style::default().bg(COLOR_CYAN));
+            let line = Line::from(vec![
+                Span::raw(before),
+                cursor_span,
+                Span::raw(after),
+            ]);
             f.render_widget(
-                Paragraph::new(state.input.clone()).block(Block::default().borders(Borders::ALL).title(input_title)),
+                Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(input_title)),
                 chunks[1],
             );
             if let Some(err) = &state.auth_error {
