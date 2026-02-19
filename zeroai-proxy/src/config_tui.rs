@@ -86,6 +86,7 @@ struct AccountListState {
 
 struct AccountLabelInputState {
     provider_id: String,
+    provider_label: String,
     account_id: String,
     input: String,
 }
@@ -279,6 +280,7 @@ async fn run_tui_loop(
                                         let acc = &state.accounts[idx];
                                         *screen = Screen::AccountLabelInput(AccountLabelInputState {
                                             provider_id: state.provider_id.clone(),
+                                            provider_label: state.provider_label.clone(),
                                             account_id: acc.id.clone(),
                                             input: acc.label.clone().unwrap_or_default(),
                                         });
@@ -326,7 +328,7 @@ async fn run_tui_loop(
                                 }
                                 *screen = Screen::AccountList(AccountListState {
                                     provider_id: state.provider_id.clone(),
-                                    provider_label: String::new(),
+                                    provider_label: state.provider_label.clone(),
                                     accounts,
                                     list_state: ls,
                                 });
@@ -346,7 +348,7 @@ async fn run_tui_loop(
                                 }
                                 *screen = Screen::AccountList(AccountListState {
                                     provider_id: state.provider_id.clone(),
-                                    provider_label: String::new(),
+                                    provider_label: state.provider_label.clone(),
                                     accounts,
                                     list_state: ls,
                                 });

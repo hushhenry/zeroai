@@ -1,7 +1,6 @@
 use super::*;
 use crate::oauth::pkce::generate_pkce;
 use async_trait::async_trait;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use std::collections::HashMap;
 

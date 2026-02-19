@@ -78,8 +78,8 @@ struct ContentBlockData {
 
 #[derive(Deserialize)]
 struct DeltaData {
-    #[serde(rename = "type", default)]
-    delta_type: Option<String>,
+    // #[serde(rename = "type", default)]
+    // delta_type: Option<String>,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]

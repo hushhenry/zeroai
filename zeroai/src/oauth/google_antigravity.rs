@@ -35,9 +35,11 @@ const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_PROJECT_ID: &str = "rising-fact-p41fc";
 
+/*
 fn decode(b64: &str) -> String {
     String::from_utf8(STANDARD.decode(b64).unwrap_or_default()).unwrap_or_default()
 }
+*/
 
 /// Antigravity OAuth provider (Gemini 3, Claude, GPT-OSS via Google Cloud).
 pub struct AntigravityOAuthProvider;
