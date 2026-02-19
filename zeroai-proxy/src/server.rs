@@ -1,6 +1,7 @@
 use zeroai::{
     AiClient, ConfigManager, StreamEvent, RequestOptions,
     split_model_id,
+    providers::retry as retry_helpers,
     types::{
         AssistantMessage, ChatContext, ContentBlock, Message, StopReason, TextContent,
         ThinkingContent, ToolCall, ToolDef, ToolResultMessage, UserMessage,
@@ -45,9 +46,9 @@ impl AppState {
         *self.client.write().await = new_client;
     }
 
-    /// Resolve API key for a provider.
-    pub async fn resolve_api_key(&self, provider: &str) -> Option<String> {
-        self.config.resolve_api_key(provider).await.ok().flatten()
+    /// Resolve an account+api_key for a provider.
+    pub async fn resolve_account(&self, provider: &str) -> Option<zeroai::auth::config::AccountSelection> {
+        self.config.resolve_account(provider).await.ok().flatten()
     }
 }
 
@@ -288,25 +289,18 @@ async fn chat_completions(
         }
     };
 
-    let client = state.client.read().await;
-    if client.get_model(&req.model).is_none() {
+    let client_arc = {
+        let client = state.client.read().await;
+        Arc::new((*client).clone())
+    };
+
+    if client_arc.get_model(&req.model).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"message": format!("Model not found: {}", req.model)}})),
         )
             .into_response();
     }
-
-    let api_key = match state.resolve_api_key(&provider_name).await {
-        Some(k) => k,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"message": format!("No credentials for provider: {}", provider_name)}})),
-            )
-                .into_response();
-        }
-    };
 
     let (system_prompt, messages) = convert_openai_messages(&req.messages);
     let tools = req.tools.as_ref().map(|t| convert_openai_tools(t)).unwrap_or_default();
@@ -317,11 +311,11 @@ async fn chat_completions(
         tools,
     };
 
-    let options = RequestOptions {
+    let base_options = RequestOptions {
         temperature: req.temperature,
         max_tokens: req.max_tokens,
         reasoning: None,
-        api_key: Some(api_key),
+        api_key: None,
         extra_headers: None,
         retry_config: None,
     };
@@ -329,16 +323,83 @@ async fn chat_completions(
     let is_stream = req.stream.unwrap_or(false);
 
     if is_stream {
-        let event_stream = match client.stream(&req.model, &context, &options) {
-            Ok(s) => s,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"message": e.to_string()}})),
-                )
-                    .into_response();
+        // Streaming rotation strategy:
+        // - pick first healthy account
+        // - if the stream fails with 429 BEFORE any content/tool events are emitted, rotate+retry with next account
+        // - once anything is emitted, we cannot safely restart; return the error
+        let provider_name2 = provider_name.clone();
+        let state2 = state.clone();
+        let model = req.model.clone();
+        let ctx = context.clone();
+        let opts0 = base_options.clone();
+        let client_arc2 = client_arc.clone();
+
+        let event_stream = async_stream::stream! {
+            let mut attempt: usize = 0;
+            let max_attempts: usize = state2.config.list_accounts(&provider_name2).map(|v| v.len().max(1)).unwrap_or(1);
+
+            loop {
+                let mut emitted_any = false;
+                let sel = match state2.resolve_account(&provider_name2).await {
+                    Some(s) => s,
+                    None => {
+                        yield Err(zeroai::ProviderError::AuthRequired(format!("No credentials for provider: {}", provider_name2)));
+                        return;
+                    }
+                };
+
+                let mut opts = opts0.clone();
+                opts.api_key = Some(sel.api_key.clone());
+
+                let mut inner = match client_arc2.stream(&model, &ctx, &opts) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                };
+
+                while let Some(item) = inner.next().await {
+                    match item {
+                        Ok(evt) => {
+                            match &evt {
+                                StreamEvent::TextDelta(_) | StreamEvent::ThinkingDelta(_) | StreamEvent::ToolCallStart {..} | StreamEvent::ToolCallDelta {..} | StreamEvent::ToolCallEnd {..} | StreamEvent::Done {..} => {
+                                    emitted_any = true;
+                                }
+                                _ => {}
+                            }
+                            yield Ok(evt);
+                        }
+                        Err(e) => {
+                            if !emitted_any && retry_helpers::is_rate_limited(&e) && attempt + 1 < max_attempts {
+                                let backoff_ms = retry_helpers::parse_retry_after_ms(&e).unwrap_or(60_000);
+                                let _ = state2.config.rate_limit_account(&provider_name2, &sel.account_id, backoff_ms);
+                                attempt += 1;
+                                // retry outer loop
+                                break;
+                            }
+                            yield Err(e);
+                            return;
+                        }
+                    }
+                }
+
+                if attempt + 1 >= max_attempts {
+                    return;
+                }
+
+                // if inner ended without error, we're done
+                if emitted_any {
+                    return;
+                }
             }
         };
+
+        let event_stream: futures::stream::BoxStream<'static, Result<StreamEvent, zeroai::ProviderError>> = Box::pin(event_stream);
+
+        // Map to OpenAI SSE
+        let event_stream = event_stream;
+
 
         let model_name = req.model.clone();
         let sse = event_stream.filter_map(move |event| {
@@ -441,95 +502,105 @@ async fn chat_completions(
 
         Sse::new(sse).into_response()
     } else {
-        // Non-streaming: collect the full response
-        let event_stream = match client.stream(&req.model, &context, &options) {
-            Ok(s) => s,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"message": e.to_string()}})),
-                )
-                    .into_response();
-            }
-        };
+        // Non-streaming: rotate accounts on 429.
+        let max_attempts: usize = state
+            .config
+            .list_accounts(&provider_name)
+            .map(|v| v.len().max(1))
+            .unwrap_or(1);
 
-        let mut final_message: Option<AssistantMessage> = None;
-        let mut stream = event_stream;
-
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(StreamEvent::Done { message }) => {
-                    final_message = Some(message);
-                    break;
+        let mut last_err: Option<zeroai::ProviderError> = None;
+        for attempt in 0..max_attempts {
+            let sel = match state.resolve_account(&provider_name).await {
+                Some(s) => s,
+                None => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": {"message": format!("No credentials for provider: {}", provider_name)}})),
+                    )
+                        .into_response();
                 }
-                Ok(StreamEvent::Error { message }) => {
-                    final_message = Some(message);
-                    break;
-                }
-                _ => {}
-            }
-        }
+            };
 
-        let msg = match final_message {
-            Some(m) => m,
-            None => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"message": "No response received"}})),
-                )
-                    .into_response();
-            }
-        };
+            let mut options = base_options.clone();
+            options.api_key = Some(sel.api_key.clone());
 
-        let mut content_text = String::new();
-        let mut tool_calls_json = Vec::new();
+            match client_arc.chat(&req.model, &context, &options).await {
+                Ok(msg) => {
+                    // Format OpenAI-compatible response below
+                    let mut content_text = String::new();
+                    let mut tool_calls_json = Vec::new();
 
-        for block in &msg.content {
-            match block {
-                ContentBlock::Text(t) => content_text.push_str(&t.text),
-                ContentBlock::ToolCall(tc) => {
-                    tool_calls_json.push(json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string()
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text(t) => content_text.push_str(&t.text),
+                            ContentBlock::ToolCall(tc) => {
+                                tool_calls_json.push(json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": tc.arguments.to_string()
+                                    }
+                                }));
+                            }
+                            _ => {}
                         }
-                    }));
+                    }
+
+                    let finish_reason = match msg.stop_reason {
+                        StopReason::Stop => "stop",
+                        StopReason::Length => "length",
+                        StopReason::ToolUse => "tool_calls",
+                        _ => "stop",
+                    };
+
+                    let response = json!({
+                        "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+                        "object": "chat.completion",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": req.model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": if content_text.is_empty() { serde_json::Value::Null } else { json!(content_text) },
+                                "tool_calls": if tool_calls_json.is_empty() { serde_json::Value::Null } else { json!(tool_calls_json) }
+                            },
+                            "finish_reason": finish_reason
+                        }],
+                        "usage": msg.usage.as_ref().map(|u| json!({
+                            "prompt_tokens": u.input_tokens,
+                            "completion_tokens": u.output_tokens,
+                            "total_tokens": u.total_tokens,
+                        }))
+                    });
+
+                    return Json(response).into_response();
                 }
-                _ => {}
+                Err(e) => {
+                    if retry_helpers::is_rate_limited(&e) && attempt + 1 < max_attempts {
+                        let backoff_ms = retry_helpers::parse_retry_after_ms(&e).unwrap_or(60_000);
+                        let _ = state
+                            .config
+                            .rate_limit_account(&provider_name, &sel.account_id, backoff_ms);
+                        last_err = Some(e);
+                        continue;
+                    }
+                    last_err = Some(e);
+                    break;
+                }
             }
         }
 
-        let finish_reason = match msg.stop_reason {
-            StopReason::Stop => "stop",
-            StopReason::Length => "length",
-            StopReason::ToolUse => "tool_calls",
-            _ => "stop",
-        };
-
-        let response = json!({
-            "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-            "object": "chat.completion",
-            "created": chrono::Utc::now().timestamp(),
-            "model": req.model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": if content_text.is_empty() { serde_json::Value::Null } else { json!(content_text) },
-                    "tool_calls": if tool_calls_json.is_empty() { serde_json::Value::Null } else { json!(tool_calls_json) }
-                },
-                "finish_reason": finish_reason
-            }],
-            "usage": msg.usage.as_ref().map(|u| json!({
-                "prompt_tokens": u.input_tokens,
-                "completion_tokens": u.output_tokens,
-                "total_tokens": u.total_tokens,
-            }))
-        });
-
-        Json(response).into_response()
+        let msg = last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "No response received".into());
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": msg}})),
+        )
+            .into_response()
     }
 }
 
@@ -658,17 +729,6 @@ async fn anthropic_messages(
             .into_response();
     }
 
-    let api_key = match state.resolve_api_key(&provider_name).await {
-        Some(k) => k,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"type": "error", "error": {"type": "authentication_error", "message": format!("No credentials for: {}", provider_name)}})),
-            )
-                .into_response();
-        }
-    };
-
     let messages = convert_anthropic_messages(&req.messages);
     let tools = req
         .tools
@@ -690,50 +750,68 @@ async fn anthropic_messages(
         tools,
     };
 
-    let options = RequestOptions {
+    let base_options = RequestOptions {
         temperature: req.temperature,
         max_tokens: Some(req.max_tokens),
         reasoning: None,
-        api_key: Some(api_key),
+        api_key: None,
         extra_headers: None,
         retry_config: None,
     };
 
-    // Non-streaming Anthropic response
-    let event_stream = match client.stream(&req.model, &context, &options) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"type": "error", "error": {"type": "api_error", "message": e.to_string()}})),
-            )
-                .into_response();
-        }
-    };
+    let max_attempts: usize = state
+        .config
+        .list_accounts(&provider_name)
+        .map(|v| v.len().max(1))
+        .unwrap_or(1);
 
-    let mut final_message: Option<AssistantMessage> = None;
-    let mut stream = event_stream;
+    let mut last_err: Option<zeroai::ProviderError> = None;
+    let mut msg_opt: Option<AssistantMessage> = None;
 
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(StreamEvent::Done { message }) => {
-                final_message = Some(message);
+    for attempt in 0..max_attempts {
+        let sel = match state.resolve_account(&provider_name).await {
+            Some(s) => s,
+            None => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"type": "error", "error": {"type": "authentication_error", "message": format!("No credentials for: {}", provider_name)}})),
+                )
+                    .into_response();
+            }
+        };
+
+        let mut options = base_options.clone();
+        options.api_key = Some(sel.api_key.clone());
+
+        match client.chat(&req.model, &context, &options).await {
+            Ok(m) => {
+                msg_opt = Some(m);
                 break;
             }
-            Ok(StreamEvent::Error { message }) => {
-                final_message = Some(message);
+            Err(e) => {
+                if retry_helpers::is_rate_limited(&e) && attempt + 1 < max_attempts {
+                    let backoff_ms = retry_helpers::parse_retry_after_ms(&e).unwrap_or(60_000);
+                    let _ = state
+                        .config
+                        .rate_limit_account(&provider_name, &sel.account_id, backoff_ms);
+                    last_err = Some(e);
+                    continue;
+                }
+                last_err = Some(e);
                 break;
             }
-            _ => {}
         }
     }
 
-    let msg = match final_message {
+    let msg = match msg_opt {
         Some(m) => m,
         None => {
+            let message = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "No response".into());
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"type": "error", "error": {"type": "api_error", "message": "No response"}})),
+                Json(json!({"type": "error", "error": {"type": "api_error", "message": message}})),
             )
                 .into_response();
         }

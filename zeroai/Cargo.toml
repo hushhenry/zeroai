@@ -28,3 +28,7 @@ pin-project-lite = { workspace = true }
 async-stream = { workspace = true }
 serde_urlencoded = { workspace = true }
 genai = { workspace = true }
+fs2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
