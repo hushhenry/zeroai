@@ -69,6 +69,8 @@ struct AuthInputState {
     oauth_url: Option<String>,
     is_add: bool,
     cursor_pos: usize,
+    initial_account_count: usize,
+    oauth_error: Option<String>,
 }
 
 struct ModelSelectState {
@@ -590,23 +592,75 @@ async fn run_tui_loop(
         }
 
         let mut next_provider_id = None;
+        let mut oauth_error_msg = None;
         if let Screen::AuthInput(state) = screen {
             if state.is_oauth {
-                if config.has_credential(&state.provider_id).unwrap_or(false) && !state.is_add {
-                    next_provider_id = Some(state.provider_id.clone());
-                } else {
-                    let info = oauth_callbacks.auth_info.lock().unwrap();
-                    if let Some(info) = &*info {
-                        state.oauth_url = Some(info.url.clone());
-                        if let Some(instr) = &info.instructions {
-                            state.hint = instr.clone();
+                // Check for OAuth error from the background task
+                let progress = oauth_callbacks._progress.lock().unwrap();
+                if progress.starts_with("OAuth failed:") {
+                    oauth_error_msg = Some(progress.clone());
+                }
+                drop(progress);
+
+                if oauth_error_msg.is_none() {
+                    // No error - check for successful completion
+                    if state.is_add {
+                        // For adding accounts: transition when account count increases
+                        if let Ok(current_accounts) = config.list_accounts(&state.provider_id) {
+                            if current_accounts.len() > state.initial_account_count {
+                                next_provider_id = Some(state.provider_id.clone());
+                            }
+                        }
+                    } else if config.has_credential(&state.provider_id).unwrap_or(false) {
+                        // For first account setup: transition when credential exists
+                        next_provider_id = Some(state.provider_id.clone());
+                    }
+
+                    // Update OAuth URL, hint and progress
+                    if next_provider_id.is_none() {
+                        let info = oauth_callbacks.auth_info.lock().unwrap();
+                        if let Some(info) = &*info {
+                            state.oauth_url = Some(info.url.clone());
+                            if let Some(instr) = &info.instructions {
+                                if state.hint.is_empty() || state.hint.starts_with("Connecting to") {
+                                    state.hint = instr.clone();
+                                }
+                            }
+                        }
+                        drop(info);
+
+                        let progress = oauth_callbacks._progress.lock().unwrap();
+                        if !progress.is_empty() {
+                            state.hint = progress.clone();
                         }
                     }
                 }
             }
         }
+
+        // Display OAuth error if present
+        if let Some(err_msg) = oauth_error_msg {
+            if let Screen::AuthInput(state) = screen {
+                state.oauth_error = Some(err_msg);
+            }
+        }
+
         if let Some(pid) = next_provider_id {
-            if is_custom_provider(&pid) {
+            let mut is_add_finished = false;
+            if let Screen::AuthInput(state) = screen {
+                if state.is_add {
+                    is_add_finished = true;
+                }
+            }
+
+            if is_add_finished {
+                let prov_info = groups.iter().flat_map(|(_, ps)| ps).find(|p| p.provider_id == pid);
+                if let Some(prov) = prov_info {
+                    enter_account_list(config.clone(), prov, screen)?;
+                } else {
+                    *screen = Screen::ProviderGroups;
+                }
+            } else if is_custom_provider(&pid) {
                 let base_url = pid.strip_prefix("custom:").unwrap_or("").trim().trim_end_matches('/');
                 let input_url = config.get_models_url(&pid).ok().flatten().unwrap_or_default();
                 let cursor_pos = input_url.len();
@@ -656,6 +710,9 @@ async fn handle_provider_select(
 ) -> anyhow::Result<()> {
     let provider_id = prov.provider_id.clone();
 
+    // Capture initial account count for detecting new accounts after OAuth
+    let initial_account_count = config.list_accounts(&provider_id).unwrap_or_default().len();
+
     if !is_add {
         if config.has_credential(&provider_id).unwrap_or(false) {
             if is_custom_provider(&provider_id) {
@@ -702,6 +759,8 @@ async fn handle_provider_select(
                 oauth_url: None,
                 is_add,
                 cursor_pos: 0,
+                initial_account_count,
+                oauth_error: None,
             });
         }
         AuthMethod::SetupToken { hint } => {
@@ -714,6 +773,8 @@ async fn handle_provider_select(
                 oauth_url: None,
                 is_add,
                 cursor_pos: 0,
+                initial_account_count,
+                oauth_error: None,
             });
         }
         AuthMethod::OAuth { hint } => {
@@ -728,17 +789,24 @@ async fn handle_provider_select(
                     "qwen" => Box::new(zeroai::oauth::qwen_portal::QwenPortalOAuthProvider),
                     _ => return,
                 };
-                if let Ok(creds) = oauth_provider.login(&*callbacks).await {
-                    let cred = Credential::OAuth(zeroai::auth::OAuthCredential {
-                        refresh: creds.refresh,
-                        access: creds.access,
-                        expires: creds.expires,
-                        extra: creds.extra,
-                    });
-                    if is_add {
-                        let _ = config_mgr.add_account(&pid, None, cred);
-                    } else {
-                        let _ = config_mgr.set_credential(&pid, cred);
+                match oauth_provider.login(&*callbacks).await {
+                    Ok(creds) => {
+                        let cred = Credential::OAuth(zeroai::auth::OAuthCredential {
+                            refresh: creds.refresh,
+                            access: creds.access,
+                            expires: creds.expires,
+                            extra: creds.extra,
+                        });
+                        if is_add {
+                            let _ = config_mgr.add_account(&pid, None, cred);
+                        } else {
+                            let _ = config_mgr.set_credential(&pid, cred);
+                        }
+                    }
+                    Err(e) => {
+                        // Store error in the callbacks progress field for display
+                        let mut progress = callbacks._progress.lock().unwrap();
+                        *progress = format!("OAuth failed: {}", e);
                     }
                 }
             });
@@ -751,6 +819,8 @@ async fn handle_provider_select(
                 oauth_url: None,
                 is_add,
                 cursor_pos: 0,
+                initial_account_count,
+                oauth_error: None,
             });
         }
     }
@@ -927,10 +997,14 @@ fn draw(
         }
         Screen::AuthInput(state) => {
             let has_info = !state.hint.is_empty() || state.oauth_url.is_some();
+            let has_error = state.oauth_error.is_some();
             let mut constraints = vec![
                 Constraint::Length(3),
                 Constraint::Length(3),
             ];
+            if has_error {
+                constraints.push(Constraint::Length(3));
+            }
             if has_info {
                 constraints.push(Constraint::Min(3));
             }
@@ -955,22 +1029,34 @@ fn draw(
             ]);
             f.render_widget(Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(input_title)), chunks[1]);
 
+            // Display OAuth error if present
+            if let Some(err) = &state.oauth_error {
+                let error_idx = if has_error { 2 } else { 1 };
+                f.render_widget(
+                    Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+                    chunks[error_idx],
+                );
+            }
+
             if has_info {
-                let mut info_content = vec![
-                    Line::from(Span::styled("Instructions: ", Style::default().fg(COLOR_YELLOW))),
-                    Line::from(state.hint.as_str()),
-                ];
-                
-                if let Some(url) = &state.oauth_url {
-                    info_content.push(Line::from(""));
-                    info_content.push(Line::from(Span::styled("Clean URL (copy below):", Style::default().fg(COLOR_CYAN))));
-                    info_content.push(Line::from(url.as_str()));
+                let info_start_idx = if has_error { 3 } else { 2 };
+                if info_start_idx < chunks.len() {
+                    let mut info_content = vec![
+                        Line::from(Span::styled("Instructions: ", Style::default().fg(COLOR_YELLOW))),
+                        Line::from(state.hint.as_str()),
+                    ];
+
+                    if let Some(url) = &state.oauth_url {
+                        info_content.push(Line::from(""));
+                        info_content.push(Line::from(Span::styled("Clean URL (copy below):", Style::default().fg(COLOR_CYAN))));
+                        info_content.push(Line::from(url.as_str()));
+                    }
+
+                    let info_para = Paragraph::new(info_content)
+                        .wrap(Wrap { trim: false })
+                        .block(Block::default().borders(Borders::NONE).title(""));
+                    f.render_widget(info_para, chunks[info_start_idx]);
                 }
-                
-                let info_para = Paragraph::new(info_content)
-                    .wrap(Wrap { trim: false })
-                    .block(Block::default().borders(Borders::NONE).title(""));
-                f.render_widget(info_para, chunks[2]);
             }
         }
         Screen::ModelsUrlInput(state) => {
