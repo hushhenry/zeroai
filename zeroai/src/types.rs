@@ -126,6 +126,7 @@ pub enum ContentBlock {
     Thinking(ThinkingContent),
     Image(ImageContent),
     ToolCall(ToolCall),
+    ThoughtSignature(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +281,7 @@ pub enum StreamEvent {
         index: usize,
         tool_call: ToolCall,
     },
+    ThoughtSignature(String),
     Done {
         message: AssistantMessage,
     },

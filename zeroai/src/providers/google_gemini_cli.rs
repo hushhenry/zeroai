@@ -233,7 +233,7 @@ struct RUsageMetadata {
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
-fn convert_messages(context: &ChatContext) -> Vec<GContent> {
+fn convert_messages(context: &ChatContext, model: &ModelDef) -> Vec<GContent> {
     let mut contents = Vec::new();
 
     for msg in &context.messages {
@@ -260,9 +260,33 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
             }
             Message::Assistant(a) => {
                 let mut parts = Vec::new();
+                let mut pending_signature: Option<String> = None;
+                let mut is_first_tool_call = true;
+                let is_gemini3 = model.id.contains("gemini-3");
+
                 for block in &a.content {
                     match block {
+                        ContentBlock::Thinking(tc) => {
+                            parts.push(GPart {
+                                text: Some(tc.thinking.clone()),
+                                function_call: None,
+                                function_response: None,
+                                thought_signature: None,
+                            });
+                            pending_signature = tc.signature.clone();
+                        }
+                        ContentBlock::ThoughtSignature(sig) => {
+                            pending_signature = Some(sig.clone());
+                        }
                         ContentBlock::Text(t) => {
+                            if let Some(sig) = pending_signature.take() {
+                                parts.push(GPart {
+                                    text: None,
+                                    function_call: None,
+                                    function_response: None,
+                                    thought_signature: Some(sig),
+                                });
+                            }
                             parts.push(GPart {
                                 text: Some(t.text.clone()),
                                 function_call: None,
@@ -270,15 +294,14 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
                                 thought_signature: None,
                             });
                         }
-                        ContentBlock::Thinking(tc) => {
-                            parts.push(GPart {
-                                text: Some(tc.thinking.clone()),
-                                function_call: None,
-                                function_response: None,
-                                thought_signature: tc.signature.clone(),
-                            });
-                        }
                         ContentBlock::ToolCall(tc) => {
+                            let thought_sig = pending_signature.take().or_else(|| {
+                                if is_first_tool_call && is_gemini3 {
+                                    Some("skip_thought_signature_validator".to_string())
+                                } else {
+                                    None
+                                }
+                            });
                             parts.push(GPart {
                                 text: None,
                                 function_call: Some(GFunctionCall {
@@ -286,12 +309,23 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
                                     args: tc.arguments.clone(),
                                 }),
                                 function_response: None,
-                                thought_signature: None,
+                                thought_signature: thought_sig,
                             });
+                            is_first_tool_call = false;
                         }
                         _ => {}
                     }
                 }
+
+                if let Some(sig) = pending_signature.take() {
+                    parts.push(GPart {
+                        text: None,
+                        function_call: None,
+                        function_response: None,
+                        thought_signature: Some(sig),
+                    });
+                }
+
                 contents.push(GContent {
                     role: "model".into(),
                     parts,
@@ -411,7 +445,7 @@ impl Provider for GoogleGeminiCliProvider {
 
         let url = format!("{}/v1internal:streamGenerateContent?alt=sse", base_url);
 
-        let contents = convert_messages(context);
+        let contents = convert_messages(context, model);
 
         let mut sys_parts = Vec::new();
         if is_antigravity {
@@ -636,6 +670,7 @@ impl Provider for GoogleGeminiCliProvider {
                                                 thinking_buf.push_str(text);
                                                 if let Some(sig) = &part.thought_signature {
                                                     thought_signature = Some(sig.clone());
+                                                    yield Ok(StreamEvent::ThoughtSignature(sig.clone()));
                                                 }
                                                 yield Ok(StreamEvent::ThinkingDelta(text.clone()));
                                             } else {
@@ -687,13 +722,16 @@ impl Provider for GoogleGeminiCliProvider {
 
             let mut content = Vec::new();
             if !thinking_buf.is_empty() {
-                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: thought_signature }));
+                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
             }
             if !text_buf.is_empty() {
                 content.push(ContentBlock::Text(TextContent { text: text_buf }));
             }
             for tc in tool_calls {
                 content.push(ContentBlock::ToolCall(tc));
+            }
+            if let Some(sig) = thought_signature.take() {
+                content.push(ContentBlock::ThoughtSignature(sig));
             }
 
             let msg = AssistantMessage {
@@ -734,17 +772,11 @@ impl Provider for GoogleGeminiCliProvider {
             match event? {
                 StreamEvent::TextDelta(d) => text_buf.push_str(&d),
                 StreamEvent::ThinkingDelta(d) => thinking_buf.push_str(&d),
+                StreamEvent::ThoughtSignature(sig) => thought_signature = Some(sig),
                 StreamEvent::ToolCallEnd { tool_call, .. } => tool_calls.push(tool_call),
                 StreamEvent::Done { message } => {
                     full_msg.usage = message.usage;
                     full_msg.stop_reason = message.stop_reason;
-                    // Extract signature from the Done message if present
-                    for block in &message.content {
-                        if let ContentBlock::Thinking(tc) = block {
-                            thought_signature = tc.signature.clone();
-                            break;
-                        }
-                    }
                 }
                 _ => {}
             }
@@ -753,7 +785,7 @@ impl Provider for GoogleGeminiCliProvider {
         if !thinking_buf.is_empty() {
             full_msg.content.push(ContentBlock::Thinking(ThinkingContent {
                 thinking: thinking_buf,
-                signature: thought_signature,
+                signature: None,
             }));
         }
         if !text_buf.is_empty() {
@@ -763,6 +795,9 @@ impl Provider for GoogleGeminiCliProvider {
         }
         for tc in tool_calls {
             full_msg.content.push(ContentBlock::ToolCall(tc));
+        }
+        if let Some(sig) = thought_signature.take() {
+            full_msg.content.push(ContentBlock::ThoughtSignature(sig));
         }
 
         Ok(full_msg)

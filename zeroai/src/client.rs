@@ -234,10 +234,10 @@ impl AiClientBuilder {
         providers.insert("github-copilot".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("amazon-bedrock".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("openai-codex".into(), openai.clone() as Arc<dyn Provider>);
+        providers.insert("xiaomi".into(), openai.clone() as Arc<dyn Provider>);
 
         let anthropic = Arc::new(AnthropicProvider::new());
         providers.insert("anthropic".into(), anthropic.clone() as Arc<dyn Provider>);
-        providers.insert("xiaomi".into(), anthropic.clone() as Arc<dyn Provider>);
         providers.insert("synthetic".into(), anthropic.clone() as Arc<dyn Provider>);
         providers.insert("cloudflare-ai-gateway".into(), anthropic.clone() as Arc<dyn Provider>);
 

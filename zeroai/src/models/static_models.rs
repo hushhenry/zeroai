@@ -207,9 +207,9 @@ pub fn static_minimax_models() -> Vec<ModelDef> {
 
 pub fn static_xiaomi_models() -> Vec<ModelDef> {
     let p = "xiaomi";
-    let url = "https://api.xiaomimimo.com/anthropic";
+    let url = "https://api.xiaomimimo.com/v1";
     vec![
-        ant(p, url, "mimo-v2-flash", "Xiaomi MiMo V2 Flash", false, 262144, 8192),
+        oai(p, url, "mimo-v2-flash", "Xiaomi MiMo V2 Flash", false, 262144, 8192),
     ]
 }
 

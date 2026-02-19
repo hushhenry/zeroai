@@ -190,7 +190,7 @@ struct ModelInfo {
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
-fn convert_messages(context: &ChatContext) -> Vec<Content> {
+fn convert_messages(context: &ChatContext, model: &ModelDef) -> Vec<Content> {
     let mut contents = Vec::new();
 
     for msg in &context.messages {
@@ -228,35 +228,51 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
             }
             Message::Assistant(a) => {
                 let mut parts = Vec::new();
-                let mut thought_signature = None;
-                for block in &a.content {
-                    if let ContentBlock::Thinking(tc) = block {
-                        thought_signature = tc.signature.clone();
-                        break;
-                    }
-                }
+                let mut pending_signature: Option<String> = None;
+                let mut is_first_tool_call = true;
+                let is_gemini3 = model.id.contains("gemini-3");
 
                 for block in &a.content {
                     match block {
+                        ContentBlock::Thinking(tc) => {
+                            parts.push(Part {
+                                text: Some(tc.thinking.clone()),
+                                function_call: None,
+                                function_response: None,
+                                inline_data: None,
+                                thought_signature: None,
+                            });
+                            pending_signature = tc.signature.clone();
+                        }
+                        ContentBlock::ThoughtSignature(sig) => {
+                            pending_signature = Some(sig.clone());
+                        }
                         ContentBlock::Text(t) => {
+                            if let Some(sig) = pending_signature.take() {
+                                parts.push(Part {
+                                    text: None,
+                                    function_call: None,
+                                    function_response: None,
+                                    inline_data: None,
+                                    thought_signature: Some(sig),
+                                });
+                            }
                             parts.push(Part {
                                 text: Some(t.text.clone()),
                                 function_call: None,
                                 function_response: None,
                                 inline_data: None,
-                                thought_signature: thought_signature.clone(),
-                            });
-                        }
-                        ContentBlock::Thinking(t) => {
-                            parts.push(Part {
-                                text: Some(t.thinking.clone()),
-                                function_call: None,
-                                function_response: None,
-                                inline_data: None,
-                                thought_signature: t.signature.clone(),
+                                thought_signature: None,
                             });
                         }
                         ContentBlock::ToolCall(tc) => {
+                            let thought_sig = pending_signature.take().or_else(|| {
+                                if is_first_tool_call && is_gemini3 {
+                                    Some("skip_thought_signature_validator".to_string())
+                                } else {
+                                    None
+                                }
+                            });
                             parts.push(Part {
                                 text: None,
                                 function_call: Some(FunctionCallPart {
@@ -265,12 +281,24 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
                                 }),
                                 function_response: None,
                                 inline_data: None,
-                                thought_signature: thought_signature.clone(),
+                                thought_signature: thought_sig,
                             });
+                            is_first_tool_call = false;
                         }
                         _ => {}
                     }
                 }
+
+                if let Some(sig) = pending_signature.take() {
+                    parts.push(Part {
+                        text: None,
+                        function_call: None,
+                        function_response: None,
+                        inline_data: None,
+                        thought_signature: Some(sig),
+                    });
+                }
+
                 contents.push(Content {
                     role: "model".into(),
                     parts,
@@ -361,7 +389,7 @@ impl Provider for GoogleProvider {
             base_url, model.id, api_key
         );
 
-        let contents = convert_messages(context);
+        let contents = convert_messages(context, model);
 
         let system_instruction = context.system_prompt.as_ref().map(|sp| SystemInstruction {
             parts: vec![Part {
@@ -507,6 +535,7 @@ impl Provider for GoogleProvider {
                                                 thinking_buf.push_str(text);
                                                 if let Some(sig) = &part.thought_signature {
                                                     thought_signature = Some(sig.clone());
+                                                    yield Ok(StreamEvent::ThoughtSignature(sig.clone()));
                                                 }
                                                 yield Ok(StreamEvent::ThinkingDelta(text.clone()));
                                             } else {
@@ -556,13 +585,16 @@ impl Provider for GoogleProvider {
 
             let mut content = Vec::new();
             if !thinking_buf.is_empty() {
-                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: thought_signature }));
+                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
             }
             if !text_buf.is_empty() {
                 content.push(ContentBlock::Text(TextContent { text: text_buf }));
             }
             for tc in tool_calls {
                 content.push(ContentBlock::ToolCall(tc));
+            }
+            if let Some(sig) = thought_signature.take() {
+                content.push(ContentBlock::ThoughtSignature(sig));
             }
 
             let msg = AssistantMessage {
@@ -597,7 +629,7 @@ impl Provider for GoogleProvider {
         let base_url = model.base_url.trim_end_matches('/').to_string();
         let url = format!("{}/models/{}:generateContent?key={}", base_url, model.id, api_key);
 
-        let contents = convert_messages(context);
+        let contents = convert_messages(context, model);
 
         let system_instruction = context.system_prompt.as_ref().map(|sp| SystemInstruction {
             parts: vec![Part {
@@ -718,13 +750,16 @@ impl Provider for GoogleProvider {
 
         let mut content = Vec::new();
         if !thinking_buf.is_empty() {
-            content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: thought_signature }));
+            content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
         }
         if !text_buf.is_empty() {
             content.push(ContentBlock::Text(TextContent { text: text_buf }));
         }
         for tc in tool_calls {
             content.push(ContentBlock::ToolCall(tc));
+        }
+        if let Some(sig) = thought_signature.take() {
+            content.push(ContentBlock::ThoughtSignature(sig));
         }
 
         Ok(AssistantMessage {
