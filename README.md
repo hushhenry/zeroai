@@ -65,7 +65,65 @@ ZeroAI is a unified AI model interface library that provides support for multipl
 
 ## Installation
 
-### From Source
+### Automatic Installation (Recommended)
+
+#### Linux / macOS
+
+```bash
+# Download and run the installation script
+curl -fsSL https://raw.githubusercontent.com/hushhenry/zeroai/main/install.sh | bash
+
+# Or download first and run
+curl -O https://raw.githubusercontent.com/hushhenry/zeroai/main/install.sh
+chmod +x install.sh
+./install.sh
+
+# Install specific version
+./install.sh --version v0.1.0
+
+# Install to custom directory
+./install.sh --dir /usr/local/bin
+```
+
+#### Windows
+
+```powershell
+# Download and run the installation script
+iwr -useb https://raw.githubusercontent.com/hushhenry/zeroai/main/install.ps1 | iex
+
+# Or download first and run
+iwr -OutFile install.ps1 https://raw.githubusercontent.com/hushhenry/zeroai/main/install.ps1
+.\install.ps1
+
+# Install specific version
+.\install.ps1 -Version v0.1.0
+
+# Install to custom directory
+.\install.ps1 -InstallDir C:\tools
+```
+
+### Manual Installation
+
+#### From Pre-built Binaries
+
+1. Go to [Releases](https://github.com/hushhenry/zeroai/releases)
+2. Download the appropriate binary for your platform:
+   - `zeroai-proxy-linux-x64` - Linux x86_64
+   - `zeroai-proxy-linux-arm64` - Linux ARM64
+   - `zeroai-proxy-macos-x64` - macOS x86_64
+   - `zeroai-proxy-macos-arm64` - macOS ARM64
+   - `zeroai-proxy-windows-x64.exe` - Windows x86_64
+   - `zeroai-proxy-windows-arm64.exe` - Windows ARM64
+3. Make it executable (Linux/macOS):
+   ```bash
+   chmod +x zeroai-proxy-linux-x64
+   ```
+4. Move to a directory in your PATH:
+   ```bash
+   mv zeroai-proxy-linux-x64 ~/.local/bin/zeroai-proxy
+   ```
+
+#### From Source
 
 ```bash
 # Clone the repository
@@ -83,9 +141,12 @@ cargo run --bin zeroai-proxy -- config
 
 ```bash
 # Start HTTP proxy server
-cargo run --bin zeroai-proxy -- serve --port 8787
+zeroai-proxy serve
 
-# Or use compiled binary
+# Or with custom settings
+zeroai-proxy serve --host 0.0.0.0 --port 8080
+
+# Or use compiled binary directly
 ./target/release/zeroai-proxy serve --port 8787
 ```
 
@@ -386,6 +447,42 @@ cargo clippy
 
 ```bash
 cargo doc --open
+```
+
+### CI/CD
+
+This project uses GitHub Actions for automated builds and releases.
+
+**Supported Platforms:**
+- Linux: x86_64, ARM64
+- macOS: x86_64, ARM64
+- Windows: x86_64, ARM64
+
+**Build Workflow:**
+- Triggered on tag push (e.g., `v1.0.0`)
+- Builds binary for each platform
+- Creates GitHub Release with all binaries
+- Deploys documentation to GitHub Pages
+
+**To create a new release:**
+```bash
+# Create and push a new tag
+git tag v1.0.0
+git push origin v1.0.0
+
+# GitHub Actions will automatically:
+# 1. Build binaries for all platforms
+# 2. Create a release with the binaries
+# 3. Deploy documentation
+```
+
+**Manual build:**
+```bash
+# Build for current platform
+cargo build --release --package zeroai-proxy
+
+# Build for specific target (requires cross-compilation setup)
+cargo build --release --package zeroai-proxy --target x86_64-unknown-linux-gnu
 ```
 
 ## Contributing

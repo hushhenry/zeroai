@@ -65,7 +65,65 @@ ZeroAI 是一个统一的 AI 模型接口库，提供了对多种 AI 提供商�
 
 ## 安装
 
-### 从源码构建
+### 自动安装 (推荐)
+
+#### Linux / macOS
+
+```bash
+# 下载并运行安装脚本
+curl -fsSL https://raw.githubusercontent.com/hushhenry/zeroai/main/install.sh | bash
+
+# 或先下载再运行
+curl -O https://raw.githubusercontent.com/hushhenry/zeroai/main/install.sh
+chmod +x install.sh
+./install.sh
+
+# 安装特定版本
+./install.sh --version v0.1.0
+
+# 安装到自定义目录
+./install.sh --dir /usr/local/bin
+```
+
+#### Windows
+
+```powershell
+# 下载并运行安装脚本
+iwr -useb https://raw.githubusercontent.com/hushhenry/zeroai/main/install.ps1 | iex
+
+# 或先下载再运行
+iwr -OutFile install.ps1 https://raw.githubusercontent.com/hushhenry/zeroai/main/install.ps1
+.\install.ps1
+
+# 安装特定版本
+.\install.ps1 -Version v0.1.0
+
+# 安装到自定义目录
+.\install.ps1 -InstallDir C:\tools
+```
+
+### 手动安装
+
+#### 从预构建的二进制文件
+
+1. 访问 [Releases](https://github.com/hushhenry/zeroai/releases)
+2. 下载适合您平台的二进制文件：
+   - `zeroai-proxy-linux-x64` - Linux x86_64
+   - `zeroai-proxy-linux-arm64` - Linux ARM64
+   - `zeroai-proxy-macos-x64` - macOS x86_64
+   - `zeroai-proxy-macos-arm64` - macOS ARM64
+   - `zeroai-proxy-windows-x64.exe` - Windows x86_64
+   - `zeroai-proxy-windows-arm64.exe` - Windows ARM64
+3. 使其可执行 (Linux/macOS)：
+   ```bash
+   chmod +x zeroai-proxy-linux-x64
+   ```
+4. 移动到 PATH 中的目录：
+   ```bash
+   mv zeroai-proxy-linux-x64 ~/.local/bin/zeroai-proxy
+   ```
+
+#### 从源码构建
 
 ```bash
 # 克隆仓库
@@ -83,9 +141,12 @@ cargo run --bin zeroai-proxy -- config
 
 ```bash
 # 启动 HTTP 代理服务器
-cargo run --bin zeroai-proxy -- serve --port 8787
+zeroai-proxy serve
 
-# 或使用编译后的二进制文件
+# 或使用自定义设置
+zeroai-proxy serve --host 0.0.0.0 --port 8080
+
+# 或直接使用编译后的二进制文件
 ./target/release/zeroai-proxy serve --port 8787
 ```
 
@@ -385,6 +446,42 @@ cargo clippy
 
 ```bash
 cargo doc --open
+```
+
+### CI/CD
+
+本项目使用 GitHub Actions 进行自动化构建和发布。
+
+**支持平台：**
+- Linux: x86_64, ARM64
+- macOS: x86_64, ARM64
+- Windows: x86_64, ARM64
+
+**构建工作流：**
+- 在标签推送时触发 (例如 `v1.0.0`)
+- 为每个平台构建二进制文件
+- 创建包含所有二进制文件的 GitHub Release
+- 将文档部署到 GitHub Pages
+
+**创建新版本：**
+```bash
+# 创建并推送新标签
+git tag v1.0.0
+git push origin v1.0.0
+
+# GitHub Actions 将自动：
+# 1. 为所有平台构建二进制文件
+# 2. 创建包含二进制文件的 Release
+# 3. 部署文档
+```
+
+**手动构建：**
+```bash
+# 构建当前平台
+cargo build --release --package zeroai-proxy
+
+# 构建特定目标 (需要交叉编译设置)
+cargo build --release --package zeroai-proxy --target x86_64-unknown-linux-gnu
 ```
 
 ## 贡献
