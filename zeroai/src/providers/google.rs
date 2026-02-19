@@ -59,6 +59,8 @@ struct Part {
     function_response: Option<FunctionResponsePart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inline_data: Option<InlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -146,6 +148,7 @@ struct ResponsePart {
     text: Option<String>,
     thought: Option<bool>,
     function_call: Option<FunctionCallResponse>,
+    thought_signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +205,7 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
                             function_call: None,
                             function_response: None,
                             inline_data: None,
+                            thought_signature: None,
                         }),
                         ContentBlock::Image(img) => Some(Part {
                             text: None,
@@ -211,6 +215,7 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
                                 mime_type: img.mime_type.clone(),
                                 data: img.data.clone(),
                             }),
+                            thought_signature: None,
                         }),
                         _ => None,
                     })
@@ -223,6 +228,14 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
             }
             Message::Assistant(a) => {
                 let mut parts = Vec::new();
+                let mut thought_signature = None;
+                for block in &a.content {
+                    if let ContentBlock::Thinking(tc) = block {
+                        thought_signature = tc.signature.clone();
+                        break;
+                    }
+                }
+
                 for block in &a.content {
                     match block {
                         ContentBlock::Text(t) => {
@@ -231,6 +244,16 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
                                 function_call: None,
                                 function_response: None,
                                 inline_data: None,
+                                thought_signature: thought_signature.clone(),
+                            });
+                        }
+                        ContentBlock::Thinking(t) => {
+                            parts.push(Part {
+                                text: Some(t.thinking.clone()),
+                                function_call: None,
+                                function_response: None,
+                                inline_data: None,
+                                thought_signature: t.signature.clone(),
                             });
                         }
                         ContentBlock::ToolCall(tc) => {
@@ -242,6 +265,7 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
                                 }),
                                 function_response: None,
                                 inline_data: None,
+                                thought_signature: thought_signature.clone(),
                             });
                         }
                         _ => {}
@@ -276,6 +300,7 @@ fn convert_messages(context: &ChatContext) -> Vec<Content> {
                             response: json!({"result": text}),
                         }),
                         inline_data: None,
+                        thought_signature: None,
                     }],
                 });
             }
@@ -344,6 +369,7 @@ impl Provider for GoogleProvider {
                 function_call: None,
                 function_response: None,
                 inline_data: None,
+                thought_signature: None,
             }],
         });
 
@@ -414,6 +440,7 @@ impl Provider for GoogleProvider {
 
             let mut text_buf = String::new();
             let mut thinking_buf = String::new();
+            let mut thought_signature: Option<String> = None;
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut usage = Usage::default();
             let mut stop_reason = StopReason::Stop;
@@ -478,6 +505,9 @@ impl Provider for GoogleProvider {
                                             let is_thinking = part.thought.unwrap_or(false);
                                             if is_thinking {
                                                 thinking_buf.push_str(text);
+                                                if let Some(sig) = &part.thought_signature {
+                                                    thought_signature = Some(sig.clone());
+                                                }
                                                 yield Ok(StreamEvent::ThinkingDelta(text.clone()));
                                             } else {
                                                 text_buf.push_str(text);
@@ -526,7 +556,7 @@ impl Provider for GoogleProvider {
 
             let mut content = Vec::new();
             if !thinking_buf.is_empty() {
-                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
+                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: thought_signature }));
             }
             if !text_buf.is_empty() {
                 content.push(ContentBlock::Text(TextContent { text: text_buf }));
@@ -575,6 +605,7 @@ impl Provider for GoogleProvider {
                 function_call: None,
                 function_response: None,
                 inline_data: None,
+                thought_signature: None,
             }],
         });
 
@@ -632,6 +663,7 @@ impl Provider for GoogleProvider {
 
         let mut text_buf = String::new();
         let mut thinking_buf = String::new();
+        let mut thought_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stop_reason = StopReason::Stop;
         let mut usage = Usage::default();
@@ -660,6 +692,9 @@ impl Provider for GoogleProvider {
                         if let Some(text) = &part.text {
                             if part.thought.unwrap_or(false) {
                                 thinking_buf.push_str(text);
+                                if let Some(sig) = &part.thought_signature {
+                                    thought_signature = Some(sig.clone());
+                                }
                             } else {
                                 text_buf.push_str(text);
                             }
@@ -683,7 +718,7 @@ impl Provider for GoogleProvider {
 
         let mut content = Vec::new();
         if !thinking_buf.is_empty() {
-            content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
+            content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: thought_signature }));
         }
         if !text_buf.is_empty() {
             content.push(ContentBlock::Text(TextContent { text: text_buf }));

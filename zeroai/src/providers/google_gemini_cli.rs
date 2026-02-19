@@ -118,6 +118,8 @@ struct GPart {
     function_call: Option<GFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_response: Option<GFunctionResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -207,6 +209,7 @@ struct RPart {
     text: Option<String>,
     thought: Option<bool>,
     function_call: Option<RFunctionCall>,
+    thought_signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -244,6 +247,7 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
                             text: Some(t.text.clone()),
                             function_call: None,
                             function_response: None,
+                            thought_signature: None,
                         }),
                         _ => None,
                     })
@@ -263,6 +267,15 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
                                 text: Some(t.text.clone()),
                                 function_call: None,
                                 function_response: None,
+                                thought_signature: None,
+                            });
+                        }
+                        ContentBlock::Thinking(tc) => {
+                            parts.push(GPart {
+                                text: Some(tc.thinking.clone()),
+                                function_call: None,
+                                function_response: None,
+                                thought_signature: tc.signature.clone(),
                             });
                         }
                         ContentBlock::ToolCall(tc) => {
@@ -273,6 +286,7 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
                                     args: tc.arguments.clone(),
                                 }),
                                 function_response: None,
+                                thought_signature: None,
                             });
                         }
                         _ => {}
@@ -306,6 +320,7 @@ fn convert_messages(context: &ChatContext) -> Vec<GContent> {
                             name: tr.tool_name.clone(),
                             response: json!({"result": text}),
                         }),
+                        thought_signature: None,
                     }],
                 });
             }
@@ -407,6 +422,7 @@ impl Provider for GoogleGeminiCliProvider {
                 ),
                 function_call: None,
                 function_response: None,
+                thought_signature: None,
             });
         }
         if let Some(sp) = &context.system_prompt {
@@ -414,6 +430,7 @@ impl Provider for GoogleGeminiCliProvider {
                 text: Some(sp.clone()),
                 function_call: None,
                 function_response: None,
+                thought_signature: None,
             });
         }
 
@@ -547,6 +564,7 @@ impl Provider for GoogleGeminiCliProvider {
 
             let mut text_buf = String::new();
             let mut thinking_buf = String::new();
+            let mut thought_signature: Option<String> = None;
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut usage = Usage::default();
             let mut stop_reason = StopReason::Stop;
@@ -616,6 +634,9 @@ impl Provider for GoogleGeminiCliProvider {
                                             let is_thinking = part.thought.unwrap_or(false);
                                             if is_thinking {
                                                 thinking_buf.push_str(text);
+                                                if let Some(sig) = &part.thought_signature {
+                                                    thought_signature = Some(sig.clone());
+                                                }
                                                 yield Ok(StreamEvent::ThinkingDelta(text.clone()));
                                             } else {
                                                 text_buf.push_str(text);
@@ -666,7 +687,7 @@ impl Provider for GoogleGeminiCliProvider {
 
             let mut content = Vec::new();
             if !thinking_buf.is_empty() {
-                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: None }));
+                content.push(ContentBlock::Thinking(ThinkingContent { thinking: thinking_buf, signature: thought_signature }));
             }
             if !text_buf.is_empty() {
                 content.push(ContentBlock::Text(TextContent { text: text_buf }));
@@ -706,6 +727,7 @@ impl Provider for GoogleGeminiCliProvider {
 
         let mut text_buf = String::new();
         let mut thinking_buf = String::new();
+        let mut thought_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
 
         while let Some(event) = stream.next().await {
@@ -716,6 +738,13 @@ impl Provider for GoogleGeminiCliProvider {
                 StreamEvent::Done { message } => {
                     full_msg.usage = message.usage;
                     full_msg.stop_reason = message.stop_reason;
+                    // Extract signature from the Done message if present
+                    for block in &message.content {
+                        if let ContentBlock::Thinking(tc) = block {
+                            thought_signature = tc.signature.clone();
+                            break;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -724,7 +753,7 @@ impl Provider for GoogleGeminiCliProvider {
         if !thinking_buf.is_empty() {
             full_msg.content.push(ContentBlock::Thinking(ThinkingContent {
                 thinking: thinking_buf,
-                signature: None,
+                signature: thought_signature,
             }));
         }
         if !text_buf.is_empty() {
