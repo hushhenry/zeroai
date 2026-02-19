@@ -875,12 +875,13 @@ fn draw(
                 let marker = if i == 0 { "★" } else { " " };
                 let now = chrono::Utc::now().timestamp_millis();
                 let color = if acc.is_healthy_at(now) { COLOR_GREEN } else { Color::Red };
-                
+
+                let id_prefix = acc.id.chars().take(8).collect::<String>();
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", marker), Style::default().fg(COLOR_YELLOW)),
                     Span::styled(acc.display_label(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::raw(" - "),
-                    Span::styled(format!("ID: {}", &acc.id[..8]), Style::default().fg(COLOR_GRAY)),
+                    Span::styled(format!("ID: {}", id_prefix), Style::default().fg(COLOR_GRAY)),
                 ]))
             }).collect();
 

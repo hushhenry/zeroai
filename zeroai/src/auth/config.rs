@@ -29,7 +29,8 @@ impl Account {
     }
 
     pub fn display_label(&self) -> String {
-        self.label.clone().unwrap_or_else(|| format!("account-{}", &self.id[..4]))
+        let id_prefix = self.id.chars().take(4).collect::<String>();
+        self.label.clone().unwrap_or_else(|| format!("account-{}", id_prefix))
     }
 }
 
