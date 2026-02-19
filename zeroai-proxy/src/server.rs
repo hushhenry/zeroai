@@ -65,6 +65,8 @@ fn build_client(config: &ConfigManager) -> AiClient {
                 .find(|m| m.provider == provider && m.id == model_id)
             {
                 models.push((full_id.clone(), def.clone()));
+            } else if let Some(def) = zeroai::models::default_model_def_for_provider(provider, model_id) {
+                models.push((full_id.clone(), def));
             }
         }
     }

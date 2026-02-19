@@ -81,10 +81,10 @@ impl ConfigManager {
         Self { path: path.into() }
     }
 
-    /// Create a config manager with the default path (~/.ai-rs/config.json).
+    /// Create a config manager with the default path (~/.zeroai/config.json).
     pub fn default_path() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        Self::new(home.join(".ai-rs").join("config.json"))
+        Self::new(home.join(".zeroai").join("config.json"))
     }
 
     /// Get the config file path.
@@ -457,7 +457,7 @@ impl ConfigManager {
                     "antigravity" => Box::new(crate::oauth::google_antigravity::AntigravityOAuthProvider),
                     "openai-codex" => Box::new(crate::oauth::openai_codex::OpenAiCodexOAuthProvider),
                     "github-copilot" => Box::new(crate::oauth::github_copilot::GitHubCopilotOAuthProvider),
-                    "qwen" => Box::new(crate::oauth::qwen_portal::QwenPortalOAuthProvider),
+                    "qwen-portal" => Box::new(crate::oauth::qwen_portal::QwenPortalOAuthProvider),
                     _ => {
                         // Unknown provider, can't refresh
                         if let Some(k) = chosen.credential.api_key() {

@@ -107,6 +107,21 @@ struct UsageData {
 }
 
 // ---------------------------------------------------------------------------
+// Setup / session token detection (Bearer auth; x-api-key for API keys only)
+// ---------------------------------------------------------------------------
+
+/// True if credential is from `claude setup-token` or OAuth (sk-ant-oat01- / sk-ant-sid).
+/// These must be sent as Authorization: Bearer; x-api-key is rejected (401).
+fn is_anthropic_setup_or_session_token(api_key: &str) -> bool {
+    api_key.starts_with("sk-ant-oat01-") || api_key.contains("sk-ant-sid")
+}
+
+/// When provider is anthropic-setup-token, always use Bearer (user explicitly chose setup-token).
+fn use_bearer_auth(provider: &str, api_key: &str) -> bool {
+    provider == "anthropic-setup-token" || is_anthropic_setup_or_session_token(api_key)
+}
+
+// ---------------------------------------------------------------------------
 // Claude Code Tool Mapping (PascalCase for Official Tools Only)
 // ---------------------------------------------------------------------------
 
@@ -171,16 +186,25 @@ impl Provider for AnthropicProvider {
             None => return Box::pin(stream::once(async { Err(ProviderError::AuthRequired("API key required".into())) })),
         };
 
-        let is_setup_token = api_key.contains("sk-ant-sid");
+        let provider_id = model.provider.as_str();
+        let is_setup_token = use_bearer_auth(provider_id, &api_key);
         let mut headers = HashMap::new();
-        headers.insert("x-api-key".to_string(), api_key.clone());
+        if is_setup_token {
+            headers.insert("Authorization".to_string(), format!("Bearer {}", api_key));
+        } else {
+            headers.insert("x-api-key".to_string(), api_key.clone());
+        }
         headers.insert("anthropic-version".to_string(), "2023-06-01".to_string());
         
         let mut system_blocks = Vec::new();
         if is_setup_token {
-            headers.insert("anthropic-beta".to_string(), "claude-code-20250219,interleaved-thinking-2025-05-14".to_string());
-            headers.insert("user-agent".to_string(), "claude-cli/2.1.2 (external, cli)".to_string());
-            system_blocks.push(json!({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}));
+            if api_key.contains("sk-ant-sid") {
+                headers.insert("anthropic-beta".to_string(), "claude-code-20250219,interleaved-thinking-2025-05-14".to_string());
+                headers.insert("user-agent".to_string(), "claude-cli/2.1.2 (external, cli)".to_string());
+                system_blocks.push(json!({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}));
+            } else {
+                headers.insert("anthropic-beta".to_string(), "oauth-2025-04-20".to_string());
+            }
         }
         if let Some(sys) = &context.system_prompt {
             system_blocks.push(json!({"type": "text", "text": sys}));
@@ -319,25 +343,34 @@ impl Provider for AnthropicProvider {
             }
         };
 
-        let is_setup_token = api_key.contains("sk-ant-sid");
+        let provider_id = model.provider.as_str();
+        let is_setup_token = use_bearer_auth(provider_id, &api_key);
         let mut headers = HashMap::new();
-        headers.insert("x-api-key".to_string(), api_key.clone());
+        if is_setup_token {
+            headers.insert("Authorization".to_string(), format!("Bearer {}", api_key));
+        } else {
+            headers.insert("x-api-key".to_string(), api_key.clone());
+        }
         headers.insert("anthropic-version".to_string(), "2023-06-01".to_string());
 
         let mut system_blocks = Vec::new();
         if is_setup_token {
-            headers.insert(
-                "anthropic-beta".to_string(),
-                "claude-code-20250219,interleaved-thinking-2025-05-14".to_string(),
-            );
-            headers.insert(
-                "user-agent".to_string(),
-                "claude-cli/2.1.2 (external, cli)".to_string(),
-            );
-            system_blocks.push(json!({
-                "type": "text",
-                "text": "You are Claude Code, Anthropic's official CLI for Claude."
-            }));
+            if api_key.contains("sk-ant-sid") {
+                headers.insert(
+                    "anthropic-beta".to_string(),
+                    "claude-code-20250219,interleaved-thinking-2025-05-14".to_string(),
+                );
+                headers.insert(
+                    "user-agent".to_string(),
+                    "claude-cli/2.1.2 (external, cli)".to_string(),
+                );
+                system_blocks.push(json!({
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude."
+                }));
+            } else {
+                headers.insert("anthropic-beta".to_string(), "oauth-2025-04-20".to_string());
+            }
         }
         if let Some(sys) = &context.system_prompt {
             system_blocks.push(json!({"type": "text", "text": sys}));
@@ -474,10 +507,75 @@ fn user_content_to_text(blocks: &[ContentBlock]) -> String {
     blocks.iter().filter_map(|b| if let ContentBlock::Text(t) = b { Some(t.text.as_str()) } else { None }).collect::<Vec<_>>().join("\n")
 }
 
+/// Helper to build a static Anthropic model entry (matches openclaw/pi-mono catalog).
+fn ant(
+    p: &str,
+    url: &str,
+    id: &str,
+    name: &str,
+    reasoning: bool,
+    ctx: u64,
+    max_tok: u64,
+) -> ModelDef {
+    ModelDef {
+        id: id.into(),
+        name: name.into(),
+        api: Api::AnthropicMessages,
+        provider: p.into(),
+        base_url: url.into(),
+        reasoning,
+        input: vec![InputModality::Text, InputModality::Image],
+        cost: ModelCost::default(),
+        context_window: ctx,
+        max_tokens: max_tok,
+        headers: None,
+    }
+}
+
+/// Static Anthropic model list (no GET /models). Aligned with openclaw ANTHROPIC_OAUTH_MODEL_KEYS and pi-mono models.generated anthropic set.
 pub fn static_anthropic_models() -> Vec<ModelDef> {
     let p = "anthropic";
     let url = "https://api.anthropic.com/v1";
+    const CTX: u64 = 200_000;
     vec![
-        ModelDef { id: "claude-3-5-sonnet-20241022".into(), name: "Claude 3.5 Sonnet".into(), api: Api::AnthropicMessages, provider: p.into(), base_url: url.into(), reasoning: false, input: vec![InputModality::Text], cost: ModelCost::default(), context_window: 200000, max_tokens: 8192, headers: None },
+        // Openclaw preferred four (OAuth / gateway allowlist)
+        ant(p, url, "claude-opus-4-6", "Claude Opus 4.6", true, CTX, 128_000),
+        ant(p, url, "claude-opus-4-5", "Claude Opus 4.5", true, CTX, 64_000),
+        ant(p, url, "claude-sonnet-4-5", "Claude Sonnet 4.5", true, CTX, 64_000),
+        ant(p, url, "claude-haiku-4-5", "Claude Haiku 4.5", true, CTX, 64_000),
+        // Sonnet 3.5 / 3.7
+        ant(p, url, "claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet v2", false, CTX, 8_192),
+        ant(p, url, "claude-3-5-sonnet-20240620", "Claude 3.5 Sonnet", false, CTX, 8_192),
+        ant(p, url, "claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet", true, CTX, 64_000),
+        ant(p, url, "claude-3-7-sonnet-latest", "Claude 3.7 Sonnet (latest)", true, CTX, 64_000),
+        // Sonnet 4 pinned
+        ant(p, url, "claude-sonnet-4-20250514", "Claude Sonnet 4", true, CTX, 64_000),
+        ant(p, url, "claude-sonnet-4-5-20250929", "Claude Sonnet 4.5", true, CTX, 64_000),
+        ant(p, url, "claude-sonnet-4-0", "Claude Sonnet 4 (latest)", true, CTX, 64_000),
+        // Opus 4 pinned
+        ant(p, url, "claude-opus-4-20250514", "Claude Opus 4", true, CTX, 32_000),
+        ant(p, url, "claude-opus-4-5-20251101", "Claude Opus 4.5", true, CTX, 64_000),
+        ant(p, url, "claude-opus-4-1", "Claude Opus 4.1", true, CTX, 32_000),
+        ant(p, url, "claude-opus-4-1-20250805", "Claude Opus 4.1", true, CTX, 32_000),
+        ant(p, url, "claude-opus-4-0", "Claude Opus 4 (latest)", true, CTX, 32_000),
+        // Haiku pinned
+        ant(p, url, "claude-haiku-4-5-20251001", "Claude Haiku 4.5", true, CTX, 64_000),
+        // Claude 3 legacy
+        ant(p, url, "claude-3-opus-20240229", "Claude Opus 3", false, CTX, 4_096),
+        ant(p, url, "claude-3-sonnet-20240229", "Claude Sonnet 3", false, CTX, 4_096),
+        ant(p, url, "claude-3-haiku-20240307", "Claude Haiku 3", false, CTX, 4_096),
+    ]
+}
+
+/// Static model list for Anthropic setup-token (OAuth / Claude Code). Aligned with openclaw ANTHROPIC_OAUTH_MODEL_KEYS.
+pub fn static_anthropic_setup_token_models() -> Vec<ModelDef> {
+    let p = "anthropic-setup-token";
+    let url = "https://api.anthropic.com/v1";
+    const CTX: u64 = 200_000;
+    vec![
+        ant(p, url, "claude-opus-4-6", "Claude Opus 4.6", true, CTX, 128_000),
+        ant(p, url, "claude-opus-4-5", "Claude Opus 4.5", true, CTX, 64_000),
+        ant(p, url, "claude-sonnet-4-5", "Claude Sonnet 4.5", true, CTX, 64_000),
+        ant(p, url, "claude-haiku-4-5", "Claude Haiku 4.5", true, CTX, 64_000),
     ]
 }

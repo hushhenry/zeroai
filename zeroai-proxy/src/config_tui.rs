@@ -178,8 +178,31 @@ async fn run_tui_loop(
         _progress: Arc::new(Mutex::new(String::new())),
     });
 
+    // When there are no accounts at all, auto-enter add-account flow for the first provider (no keypress required).
+    let mut auto_entered = false;
+
     loop {
         terminal.draw(|f| draw(f, &config, groups, screen, group_state, sub_state))?;
+
+        // Once per session: if we're on provider list and no provider has any account, auto-open add flow
+        if !auto_entered {
+            if let Screen::ProviderGroups = screen {
+                let has_any = groups.iter().any(|(_, ps)| {
+                    ps.iter().any(|p| config.has_credential(&p.provider_id).unwrap_or(false))
+                });
+                if !has_any {
+                    if let Some((_, providers)) = groups.first() {
+                        if let Some(prov) = providers.first() {
+                            let no_accounts = enter_account_list(config.clone(), prov, screen)?;
+                            if no_accounts {
+                                handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone(), false).await?;
+                            }
+                            auto_entered = true;
+                        }
+                    }
+                }
+            }
+        }
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -207,7 +230,10 @@ async fn run_tui_loop(
                                         let (_, providers) = &groups[idx];
                                         if providers.len() == 1 {
                                             let prov = &providers[0];
-                                            enter_account_list(config.clone(), prov, screen)?;
+                                            let no_accounts = enter_account_list(config.clone(), prov, screen)?;
+                                            if no_accounts {
+                                                handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone(), false).await?;
+                                            }
                                         } else {
                                             sub_state.select(Some(0));
                                             *screen = Screen::SubProviders(idx);
@@ -238,7 +264,10 @@ async fn run_tui_loop(
                                 if let Some(idx) = sub_state.selected() {
                                     if idx < providers.len() {
                                         let prov = &providers[idx];
-                                        enter_account_list(config.clone(), prov, screen)?;
+                                        let no_accounts = enter_account_list(config.clone(), prov, screen)?;
+                                        if no_accounts {
+                                            handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone(), false).await?;
+                                        }
                                     }
                                 }
                             }
@@ -278,7 +307,11 @@ async fn run_tui_loop(
                                         config.remove_account(&state.provider_id, &state.accounts[idx].id)?;
                                         state.accounts = config.list_accounts(&state.provider_id)?;
                                         if state.accounts.is_empty() {
-                                            state.list_state.select(None);
+                                            // No accounts left: auto-enter add-account flow
+                                            let prov_info = groups.iter().flat_map(|(_, ps)| ps).find(|p| p.provider_id == state.provider_id);
+                                            if let Some(prov) = prov_info {
+                                                handle_provider_select(config.clone(), prov, screen, oauth_callbacks.clone(), true).await?;
+                                            }
                                         } else if idx >= state.accounts.len() {
                                             state.list_state.select(Some(state.accounts.len().saturating_sub(1)));
                                         } else {
@@ -656,7 +689,8 @@ async fn run_tui_loop(
             if is_add_finished {
                 let prov_info = groups.iter().flat_map(|(_, ps)| ps).find(|p| p.provider_id == pid);
                 if let Some(prov) = prov_info {
-                    enter_account_list(config.clone(), prov, screen)?;
+                    // After adding an account, always go to account list (accounts won't be empty)
+                    let _ = enter_account_list(config.clone(), prov, screen)?;
                 } else {
                     *screen = Screen::ProviderGroups;
                 }
@@ -678,27 +712,21 @@ async fn run_tui_loop(
     }
 }
 
-fn enter_account_list(config: ConfigManager, prov: &ProviderAuthInfo, screen: &mut Screen) -> anyhow::Result<()> {
+/// Returns `true` if the provider has zero accounts (caller should trigger add-account flow).
+fn enter_account_list(config: ConfigManager, prov: &ProviderAuthInfo, screen: &mut Screen) -> anyhow::Result<bool> {
     let accounts = config.list_accounts(&prov.provider_id)?;
     if accounts.is_empty() {
-        // Just go to add account directly if empty? No, show empty list so they can press 'a'
-        *screen = Screen::AccountList(AccountListState {
-            provider_id: prov.provider_id.clone(),
-            provider_label: prov.label.clone(),
-            accounts: Vec::new(),
-            list_state: ListState::default(),
-        });
-    } else {
-        let mut ls = ListState::default();
-        ls.select(Some(0));
-        *screen = Screen::AccountList(AccountListState {
-            provider_id: prov.provider_id.clone(),
-            provider_label: prov.label.clone(),
-            accounts,
-            list_state: ls,
-        });
+        return Ok(true);
     }
-    Ok(())
+    let mut ls = ListState::default();
+    ls.select(Some(0));
+    *screen = Screen::AccountList(AccountListState {
+        provider_id: prov.provider_id.clone(),
+        provider_label: prov.label.clone(),
+        accounts,
+        list_state: ls,
+    });
+    Ok(false)
 }
 
 async fn handle_provider_select(
@@ -786,7 +814,7 @@ async fn handle_provider_select(
                     "antigravity" => Box::new(AntigravityOAuthProvider),
                     "openai-codex" => Box::new(zeroai::oauth::openai_codex::OpenAiCodexOAuthProvider),
                     "github-copilot" => Box::new(zeroai::oauth::github_copilot::GitHubCopilotOAuthProvider),
-                    "qwen" => Box::new(zeroai::oauth::qwen_portal::QwenPortalOAuthProvider),
+                    "qwen-portal" => Box::new(zeroai::oauth::qwen_portal::QwenPortalOAuthProvider),
                     _ => return,
                 };
                 match oauth_provider.login(&*callbacks).await {
@@ -922,8 +950,6 @@ fn draw(
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", marker), Style::default().fg(color)),
                     Span::styled(format!("{: <25}", p.label), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" - "),
-                    Span::styled(p.hint.as_str(), Style::default().fg(COLOR_GRAY)),
                 ]))
             }).collect();
             

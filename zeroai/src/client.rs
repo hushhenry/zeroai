@@ -227,6 +227,8 @@ impl AiClientBuilder {
         providers.insert("openrouter".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("minimax".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("moonshot".into(), openai.clone() as Arc<dyn Provider>);
+        providers.insert("qwen".into(), openai.clone() as Arc<dyn Provider>);
+        providers.insert("qwen-portal".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("qianfan".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("ollama".into(), openai.clone() as Arc<dyn Provider>);
         providers.insert("vllm".into(), openai.clone() as Arc<dyn Provider>);
@@ -238,6 +240,7 @@ impl AiClientBuilder {
 
         let anthropic = Arc::new(AnthropicProvider::new());
         providers.insert("anthropic".into(), anthropic.clone() as Arc<dyn Provider>);
+        providers.insert("anthropic-setup-token".into(), anthropic.clone() as Arc<dyn Provider>);
         providers.insert("synthetic".into(), anthropic.clone() as Arc<dyn Provider>);
         providers.insert("cloudflare-ai-gateway".into(), anthropic.clone() as Arc<dyn Provider>);
 

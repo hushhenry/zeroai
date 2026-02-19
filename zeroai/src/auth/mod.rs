@@ -115,22 +115,22 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
                 hint: Some("OAuth flow for ChatGPT session".into()),
             }],
         },
-        // Anthropic Group
+        // Anthropic Group (API key and setup-token are separate providers; model lists differ)
         ProviderAuthInfo {
             provider_id: "anthropic".into(),
             label: "Anthropic API key".into(),
             group: "Anthropic".into(),
-            hint: "setup-token + API key".into(),
+            hint: "Full model list".into(),
             auth_methods: vec![AuthMethod::ApiKey {
                 env_var: Some("ANTHROPIC_API_KEY".into()),
                 hint: None,
             }],
         },
         ProviderAuthInfo {
-            provider_id: "anthropic".into(),
-            label: "Anthropic token (paste setup-token)".into(),
+            provider_id: "anthropic-setup-token".into(),
+            label: "Anthropic (setup-token)".into(),
             group: "Anthropic".into(),
-            hint: "setup-token + API key".into(),
+            hint: "OAuth allowlist (Claude Code)".into(),
             auth_methods: vec![AuthMethod::SetupToken {
                 hint: Some("run `claude setup-token` elsewhere, then paste the token here".into()),
             }],
@@ -219,12 +219,12 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
                 hint: None,
             }],
         },
-        // Qwen Group
+        // Qwen Group (OAuth token is for portal.qwen.ai only; API key is for DashScope)
         ProviderAuthInfo {
-            provider_id: "qwen".into(),
-            label: "Qwen OAuth".into(),
+            provider_id: "qwen-portal".into(),
+            label: "Qwen (OAuth)".into(),
             group: "Qwen".into(),
-            hint: "OAuth".into(),
+            hint: "portal.qwen.ai".into(),
             auth_methods: vec![AuthMethod::OAuth {
                 hint: None,
             }],
@@ -233,9 +233,9 @@ pub fn all_provider_auth_info() -> Vec<ProviderAuthInfo> {
             provider_id: "qwen".into(),
             label: "Qwen API key".into(),
             group: "Qwen".into(),
-            hint: "Standard API key".into(),
+            hint: "DashScope".into(),
             auth_methods: vec![AuthMethod::ApiKey {
-                env_var: Some("QWEN_API_KEY".into()),
+                env_var: Some("DASHSCOPE_API_KEY".into()),
                 hint: None,
             }],
         },
@@ -352,4 +352,41 @@ pub fn provider_groups() -> Vec<(String, Vec<ProviderAuthInfo>)> {
         }
     }
     groups
+}
+
+// ---------------------------------------------------------------------------
+// Provider base URL (single source: API and models use the same base)
+// ---------------------------------------------------------------------------
+
+/// Returns the base URL for a provider (API and models use the same URL).
+/// Returns `None` for providers we don't have a registered base URL for.
+pub fn provider_base_url(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "openai" | "openai-codex" => Some("https://api.openai.com/v1"),
+        "deepseek" => Some("https://api.deepseek.com/v1"),
+        "xai" => Some("https://api.x.ai/v1"),
+        "groq" => Some("https://api.groq.com/openai/v1"),
+        "together" => Some("https://api.together.xyz/v1"),
+        "siliconflow" => Some("https://api.siliconflow.cn/v1"),
+        "fireworks" => Some("https://api.fireworks.ai/inference/v1"),
+        "nebius" => Some("https://api.studio.nebius.com/v1"),
+        "openrouter" => Some("https://openrouter.ai/api/v1"),
+        "minimax" => Some("https://api.minimax.chat/v1"),
+        "moonshot" => Some("https://api.moonshot.ai/v1"),
+        "huggingface" => Some("https://api-inference.huggingface.co/v1"),
+        "venice" => Some("https://api.venice.ai/api/v1"),
+        "ollama" => Some("http://127.0.0.1:11434/v1"),
+        "vllm" => Some("http://127.0.0.1:8000/v1"),
+        "zhipuai" => Some("https://open.bigmodel.cn/api/paas/v4"),
+        "xiaomi" => Some("https://api.xiaomimimo.com/v1"),
+        "qianfan" => Some("https://qianfan.baidubce.com/v2"),
+        "qwen" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        "qwen-portal" => Some("https://portal.qwen.ai/v1"),
+        "google" => Some("https://generativelanguage.googleapis.com/v1beta"),
+        "synthetic" => Some("https://api.synthetic.ai/v1"),
+        "cloudflare-ai-gateway" => Some("https://gateway.ai.cloudflare.com/v1"),
+        "github-copilot" => Some("https://api.githubcopilot.com"),
+        "amazon-bedrock" => Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+        _ => None,
+    }
 }

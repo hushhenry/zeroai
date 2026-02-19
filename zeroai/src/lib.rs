@@ -9,7 +9,8 @@ pub mod types;
 // Re-exports for convenience
 pub use auth::config::ConfigManager;
 pub use auth::{
-    all_provider_auth_info, provider_groups, AuthMethod, Credential, ProviderAuthInfo,
+    all_provider_auth_info, provider_base_url, provider_groups, AuthMethod, Credential,
+    ProviderAuthInfo,
 };
 pub use client::{AiClient, AiClientBuilder};
 pub use mapper::{join_model_id, split_model_id};
