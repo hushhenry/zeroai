@@ -89,13 +89,144 @@ cargo run --bin zeroai-proxy -- serve --port 8787
 ./target/release/zeroai-proxy serve --port 8787
 ```
 
+## CLI Commands
+
+The `zeroai-proxy` binary provides the following subcommands:
+
+### `serve` - Start HTTP Proxy Server
+
+Start an OpenAI-compatible HTTP proxy server that routes requests to configured AI providers.
+
+**Usage:**
+```bash
+zeroai-proxy serve [OPTIONS]
+
+# Options:
+#   -p, --port <PORT>     Port to listen on (default: 8787)
+#   --host <HOST>         Host to bind to (default: 127.0.0.1)
+```
+
+**Examples:**
+```bash
+# Start server on default port (8787)
+zeroai-proxy serve
+
+# Start server on custom port
+zeroai-proxy serve --port 9000
+
+# Bind to specific interface
+zeroai-proxy serve --host 0.0.0.0 --port 8080
+```
+
+**API Endpoints:**
+- `GET /v1/models` - List available models
+- `POST /v1/chat/completions` - Chat completion (OpenAI format)
+- `POST /v1/messages` - Anthropic Messages API format
+
+**Example API Usage:**
+```bash
+# List models
+curl http://127.0.0.1:8787/v1/models
+
+# Chat completion
+curl -X POST http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### `config` - Configure Providers (TUI)
+
+Start an interactive TUI configuration tool to set up providers and authentication.
+
+**Usage:**
+```bash
+zeroai-proxy config
+```
+
+**Features:**
+- Browse and select AI providers
+- Configure authentication methods:
+  - API Key (environment variable or manual entry)
+  - OAuth (device authorization flow)
+  - Setup Token (Anthropic Claude Code)
+- Manage enabled models for each provider
+- View and edit configuration file
+
+**Navigation:**
+- Use arrow keys to navigate
+- Press `Enter` to select
+- Press `a` to add account
+- Press `d` to delete account
+- Press `q` or `Esc` to quit
+
+### `auth-check` - Validate Credentials
+
+Validate credentials for all configured providers by checking API connectivity.
+
+**Usage:**
+```bash
+zeroai-proxy auth-check
+```
+
+**Output:**
+- ✅ Provider name with number of models
+- ❌ Provider name with error message (Unauthorized/Forbidden)
+
+**Example:**
+```
+Checking credentials for 3 provider(s)...
+
+  ✅ openai (4 model(s))
+  ✅ anthropic (2 model(s))
+  ❌ qwen-portal: 401 Unauthorized / Forbidden
+```
+
+### `doctor` - Health Check
+
+Run health checks on configured models to verify functionality.
+
+**Usage:**
+```bash
+zeroai-proxy doctor [OPTIONS]
+
+# Options:
+#   -m, --model <MODEL>   Specific model to check (format: <provider>/<model>)
+```
+
+**Examples:**
+```bash
+# Check all enabled models (one per provider)
+zeroai-proxy doctor
+
+# Check specific model
+zeroai-proxy doctor --model openai/gpt-4o
+```
+
+**What it does:**
+1. Tests each model with a simple chat completion
+2. Verifies tool calling capability (uses `get_current_time` tool)
+3. Checks streaming response
+4. Validates tool result processing
+
+**Output:**
+```
+📋 Checking openai/gpt-4o...
+  Stream:     ✅ 128 tokens, stop=length
+  Tool call:  ✅ Received
+  Tool result: ✅ Processed
+```
+
 ## Usage
 
 ### 1. Configure Providers
 
 ```bash
 # Start TUI configuration tool
-cargo run --bin zeroai-proxy -- config
+zeroai-proxy config
 ```
 
 In the TUI:
@@ -103,7 +234,17 @@ In the TUI:
 - Choose authentication method (API key / OAuth / Setup Token)
 - Follow the prompts to complete authentication
 
-### 2. Using the Proxy Server
+### 2. Start Proxy Server
+
+```bash
+# Start HTTP proxy server
+zeroai-proxy serve
+
+# Or with custom settings
+zeroai-proxy serve --host 0.0.0.0 --port 8080
+```
+
+### 3. Using the Proxy Server
 
 The proxy server provides OpenAI-compatible API endpoints:
 
@@ -121,7 +262,17 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   }'
 ```
 
-### 3. Using as a Library
+### 4. Validate Configuration
+
+```bash
+# Check credentials for all providers
+zeroai-proxy auth-check
+
+# Run health checks on models
+zeroai-proxy doctor
+```
+
+### 5. Using as a Library
 
 ```rust
 use zeroai::{AiClientBuilder, ProviderAuthInfo};

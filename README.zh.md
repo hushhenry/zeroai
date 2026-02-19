@@ -89,13 +89,144 @@ cargo run --bin zeroai-proxy -- serve --port 8787
 ./target/release/zeroai-proxy serve --port 8787
 ```
 
+## CLI 命令
+
+`zeroai-proxy` 二进制文件提供以下子命令：
+
+### `serve` - 启动 HTTP 代理服务器
+
+启动一个 OpenAI 兼容的 HTTP 代理服务器，将请求路由到配置的 AI 提供商。
+
+**用法：**
+```bash
+zeroai-proxy serve [OPTIONS]
+
+# 选项：
+#   -p, --port <PORT>     监听端口 (默认: 8787)
+#   --host <HOST>         绑定主机 (默认: 127.0.0.1)
+```
+
+**示例：**
+```bash
+# 启动服务器到默认端口 (8787)
+zeroai-proxy serve
+
+# 启动服务器到自定义端口
+zeroai-proxy serve --port 9000
+
+# 绑定到特定接口
+zeroai-proxy serve --host 0.0.0.0 --port 8080
+```
+
+**API 端点：**
+- `GET /v1/models` - 列出可用模型
+- `POST /v1/chat/completions` - 聊天补全 (OpenAI 格式)
+- `POST /v1/messages` - Anthropic Messages API 格式
+
+**API 使用示例：**
+```bash
+# 列出模型
+curl http://127.0.0.1:8787/v1/models
+
+# 聊天补全
+curl -X POST http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -d '{
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### `config` - 配置提供商 (TUI)
+
+启动交互式 TUI 配置工具来设置提供商和认证。
+
+**用法：**
+```bash
+zeroai-proxy config
+```
+
+**功能：**
+- 浏览和选择 AI 提供商
+- 配置认证方式：
+  - API Key (环境变量或手动输入)
+  - OAuth (设备授权流程)
+  - Setup Token (Anthropic Claude Code)
+- 管理每个提供商的启用模型
+- 查看和编辑配置文件
+
+**导航：**
+- 使用方向键导航
+- 按 `Enter` 选择
+- 按 `a` 添加账户
+- 按 `d` 删除账户
+- 按 `q` 或 `Esc` 退出
+
+### `auth-check` - 验证凭据
+
+验证所有配置提供商的凭据，检查 API 连接性。
+
+**用法：**
+```bash
+zeroai-proxy auth-check
+```
+
+**输出：**
+- ✅ 提供商名称和模型数量
+- ❌ 提供商名称和错误信息 (未授权/禁止访问)
+
+**示例：**
+```
+Checking credentials for 3 provider(s)...
+
+  ✅ openai (4 model(s))
+  ✅ anthropic (2 model(s))
+  ❌ qwen-portal: 401 Unauthorized / Forbidden
+```
+
+### `doctor` - 健康检查
+
+对配置的模型运行健康检查以验证功能。
+
+**用法：**
+```bash
+zeroai-proxy doctor [OPTIONS]
+
+# 选项：
+#   -m, --model <MODEL>   要检查的特定模型 (格式: <provider>/<model>)
+```
+
+**示例：**
+```bash
+# 检查所有启用的模型 (每个提供商一个)
+zeroai-proxy doctor
+
+# 检查特定模型
+zeroai-proxy doctor --model openai/gpt-4o
+```
+
+**功能：**
+1. 使用简单的聊天补全测试每个模型
+2. 验证工具调用能力 (使用 `get_current_time` 工具)
+3. 检查流式响应
+4. 验证工具结果处理
+
+**输出：**
+```
+📋 Checking openai/gpt-4o...
+  Stream:     ✅ 128 tokens, stop=length
+  Tool call:  ✅ Received
+  Tool result: ✅ Processed
+```
+
 ## 使用方法
 
 ### 1. 配置提供商
 
 ```bash
 # 启动 TUI 配置工具
-cargo run --bin zeroai-proxy -- config
+zeroai-proxy config
 ```
 
 在 TUI 中：
@@ -103,7 +234,17 @@ cargo run --bin zeroai-proxy -- config
 - 选择认证方式 (API key / OAuth / Setup Token)
 - 按照提示完成认证
 
-### 2. 使用代理服务器
+### 2. 启动代理服务器
+
+```bash
+# 启动 HTTP 代理服务器
+zeroai-proxy serve
+
+# 或使用自定义设置
+zeroai-proxy serve --host 0.0.0.0 --port 8080
+```
+
+### 3. 使用代理服务器
 
 代理服务器提供 OpenAI 兼容的 API 端点：
 
@@ -121,7 +262,17 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   }'
 ```
 
-### 3. 作为库使用
+### 4. 验证配置
+
+```bash
+# 检查所有提供商的凭据
+zeroai-proxy auth-check
+
+# 对模型运行健康检查
+zeroai-proxy doctor
+```
+
+### 5. 作为库使用
 
 ```rust
 use zeroai::{AiClientBuilder, ProviderAuthInfo};
