@@ -131,6 +131,10 @@ pub fn static_openai_models() -> Vec<ModelDef> {
         oai(p, url, "gpt-4o-mini", "GPT-4o Mini", false, 128000, 16384),
         oai(p, url, "o1", "o1", true, 200000, 100000),
         oai(p, url, "o3-mini", "o3-mini", true, 200000, 65536),
+
+        // API-key Codex models: use OpenAI Responses API on api.openai.com.
+        oai_responses(p, url, "gpt-5.2-codex", "GPT-5.2 Codex", true, 200000, 65536),
+        oai_responses(p, url, "gpt-5.3-codex", "GPT-5.3 Codex", true, 200000, 65536),
     ]
 }
 

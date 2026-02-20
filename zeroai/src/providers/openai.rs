@@ -388,7 +388,14 @@ impl OpenAiProvider {
         };
 
         let base_url = model.base_url.trim_end_matches('/').to_string();
-        let url = format!("{}/codex/responses", base_url);
+        // Two Responses endpoints exist:
+        // - OpenAI official API:   https://api.openai.com/v1/responses
+        // - Codex OAuth backend:   https://chatgpt.com/backend-api/codex/responses
+        let url = if base_url.contains("chatgpt.com") {
+            format!("{}/codex/responses", base_url)
+        } else {
+            format!("{}/responses", base_url)
+        };
 
         // Convert ChatContext → Responses input (text-only for now).
         let mut input: Vec<ResponsesInputMessage> = Vec::new();
@@ -437,22 +444,35 @@ impl OpenAiProvider {
             }
         }
 
+        let is_codex_oauth_backend = base_url.contains("chatgpt.com");
+
         let tools = if context.tools.is_empty() {
             None
         } else {
-            // Map ToolDef → OpenAI Responses function tool shape.
             Some(
                 context
                     .tools
                     .iter()
                     .map(|t| {
-                        // Codex backend expects a simplified tool schema (no {type:"function", function:{...}} wrapper).
-                        json!({
-                            "type": "function",
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        })
+                        if is_codex_oauth_backend {
+                            // Codex OAuth backend expects a simplified tool schema.
+                            json!({
+                                "type": "function",
+                                "name": t.name,
+                                "description": t.description,
+                                "parameters": t.parameters,
+                            })
+                        } else {
+                            // Official OpenAI Responses API uses the nested function wrapper.
+                            json!({
+                                "type": "function",
+                                "function": {
+                                    "name": t.name,
+                                    "description": t.description,
+                                    "parameters": t.parameters,
+                                }
+                            })
+                        }
                     })
                     .collect(),
             )
@@ -467,9 +487,9 @@ impl OpenAiProvider {
             model: model.id.clone(),
             instructions,
             input,
-            // Codex backend rejects some standard OpenAI params (e.g. temperature).
-            temperature: None,
-            max_output_tokens: None,
+            // OpenAI official supports temperature/max_output_tokens; Codex OAuth backend rejects some.
+            temperature: if is_codex_oauth_backend { None } else { options.temperature },
+            max_output_tokens: if is_codex_oauth_backend { None } else { options.max_tokens.map(|v| v as u64) },
             stream: true,
             store: false,
             tools,
