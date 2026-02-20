@@ -91,6 +91,22 @@ fn oai(provider: &str, base_url: &str, id: &str, name: &str, reasoning: bool, ct
     }
 }
 
+fn oai_responses(provider: &str, base_url: &str, id: &str, name: &str, reasoning: bool, ctx: u64, max_tok: u64) -> ModelDef {
+    ModelDef {
+        id: id.into(),
+        name: name.into(),
+        api: Api::OpenaiResponses,
+        provider: provider.into(),
+        base_url: base_url.into(),
+        reasoning,
+        input: vec![InputModality::Text, InputModality::Image],
+        cost: ModelCost::default(),
+        context_window: ctx,
+        max_tokens: max_tok,
+        headers: None,
+    }
+}
+
 fn ant(provider: &str, base_url: &str, id: &str, name: &str, reasoning: bool, ctx: u64, max_tok: u64) -> ModelDef {
     ModelDef {
         id: id.into(),
@@ -123,13 +139,15 @@ pub fn static_openai_codex_models() -> Vec<ModelDef> {
     let p = "openai-codex";
     let url = base_url(p);
     vec![
-        oai(p, url, "gpt-5.2", "GPT-5.2", true, 200000, 65536),
-        oai(p, url, "gpt-5.2-codex", "GPT-5.2 Codex", true, 200000, 65536),
-        oai(p, url, "gpt-5.3-codex", "GPT-5.3 Codex", true, 200000, 65536),
-        oai(p, url, "gpt-4o", "GPT-4o", false, 128000, 16384),
-        oai(p, url, "gpt-4o-mini", "GPT-4o Mini", false, 128000, 16384),
-        oai(p, url, "o1", "o1", true, 200000, 100000),
-        oai(p, url, "o3-mini", "o3-mini", true, 200000, 65536),
+        // Codex OAuth runs on the ChatGPT backend "responses" API.
+        oai_responses(p, url, "gpt-5.2", "GPT-5.2", true, 200000, 65536),
+        oai_responses(p, url, "gpt-5.2-codex", "GPT-5.2 Codex", true, 200000, 65536),
+        oai_responses(p, url, "gpt-5.3-codex", "GPT-5.3 Codex", true, 200000, 65536),
+        // Keep a few non-codex IDs for convenience; still routed via the same backend for this provider.
+        oai_responses(p, url, "gpt-4o", "GPT-4o", false, 128000, 16384),
+        oai_responses(p, url, "gpt-4o-mini", "GPT-4o Mini", false, 128000, 16384),
+        oai_responses(p, url, "o1", "o1", true, 200000, 100000),
+        oai_responses(p, url, "o3-mini", "o3-mini", true, 200000, 65536),
     ]
 }
 

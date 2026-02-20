@@ -362,7 +362,10 @@ pub fn provider_groups() -> Vec<(String, Vec<ProviderAuthInfo>)> {
 /// Returns `None` for providers we don't have a registered base URL for.
 pub fn provider_base_url(provider_id: &str) -> Option<&'static str> {
     match provider_id {
-        "openai" | "openai-codex" => Some("https://api.openai.com/v1"),
+        "openai" => Some("https://api.openai.com/v1"),
+        // OpenAI Codex (ChatGPT OAuth) uses the ChatGPT backend API, not api.openai.com.
+        // See OpenClaw implementation: https://chatgpt.com/backend-api/codex/responses
+        "openai-codex" => Some("https://chatgpt.com/backend-api"),
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "xai" => Some("https://api.x.ai/v1"),
         "groq" => Some("https://api.groq.com/openai/v1"),

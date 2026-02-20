@@ -336,6 +336,262 @@ fn parse_sse_line(line: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI Responses-style (used by OpenAI Codex OAuth via chatgpt.com backend)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ResponsesInputMessage {
+    role: String,
+    content: Vec<ResponsesInputContent>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum ResponsesInputContent {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+}
+
+#[derive(Serialize)]
+struct ResponsesRequest {
+    model: String,
+    // Codex backend requires an explicit instructions string.
+    instructions: String,
+    input: Vec<ResponsesInputMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
+    stream: bool,
+    // ChatGPT backend codex endpoint requires store=false (see OpenClaw).
+    store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+}
+
+impl OpenAiProvider {
+    fn stream_responses(
+        &self,
+        model: &ModelDef,
+        context: &ChatContext,
+        options: &RequestOptions,
+    ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
+        let api_key = match &options.api_key {
+            Some(k) => k.clone(),
+            None => {
+                return Box::pin(stream::once(async {
+                    Err(ProviderError::AuthRequired(
+                        "API key required for OpenAI".into(),
+                    ))
+                }));
+            }
+        };
+
+        let base_url = model.base_url.trim_end_matches('/').to_string();
+        let url = format!("{}/codex/responses", base_url);
+
+        // Convert ChatContext → Responses input (text-only for now).
+        let mut input: Vec<ResponsesInputMessage> = Vec::new();
+        if let Some(sys) = &context.system_prompt {
+            input.push(ResponsesInputMessage {
+                role: "system".into(),
+                content: vec![ResponsesInputContent::InputText { text: sys.clone() }],
+            });
+        }
+        for msg in &context.messages {
+            match msg {
+                Message::User(u) => {
+                    let text = u
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    input.push(ResponsesInputMessage {
+                        role: "user".into(),
+                        content: vec![ResponsesInputContent::InputText { text }],
+                    });
+                }
+                Message::Assistant(a) => {
+                    let text = a
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text(t) => Some(t.text.clone()),
+                            ContentBlock::Thinking(t) => Some(t.thinking.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    input.push(ResponsesInputMessage {
+                        role: "assistant".into(),
+                        content: vec![ResponsesInputContent::InputText { text }],
+                    });
+                }
+                Message::ToolResult(_t) => {
+                    // Ignore tool results in the input for now.
+                }
+            }
+        }
+
+        let tools = if context.tools.is_empty() {
+            None
+        } else {
+            // Map ToolDef → OpenAI Responses function tool shape.
+            Some(
+                context
+                    .tools
+                    .iter()
+                    .map(|t| {
+                        // Codex backend expects a simplified tool schema (no {type:"function", function:{...}} wrapper).
+                        json!({
+                            "type": "function",
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        })
+                    })
+                    .collect(),
+            )
+        };
+
+        let instructions = context
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| "You are a helpful assistant.".into());
+
+        let body = ResponsesRequest {
+            model: model.id.clone(),
+            instructions,
+            input,
+            // Codex backend rejects some standard OpenAI params (e.g. temperature).
+            temperature: None,
+            max_output_tokens: None,
+            stream: true,
+            store: false,
+            tools,
+        };
+
+        let mut headers_map = HashMap::new();
+        if let Some(model_headers) = &model.headers {
+            headers_map.extend(model_headers.clone());
+        }
+        if let Some(extra) = &options.extra_headers {
+            headers_map.extend(extra.clone());
+        }
+
+        let client = self.client.clone();
+        let model_id = model.id.clone();
+        let provider_id = model.provider.clone();
+
+        Box::pin(async_stream::stream! {
+            let mut req = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream");
+
+            for (k, v) in &headers_map {
+                req = req.header(k.as_str(), v.as_str());
+            }
+
+            let resp = match req.json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(ProviderError::Network(e));
+                    return;
+                }
+            };
+
+            let status = resp.status();
+            if !status.is_success() {
+                let body_text = resp.text().await.unwrap_or_default();
+                yield Err(ProviderError::Http {
+                    status: status.as_u16(),
+                    body: sanitize::sanitize_api_error(&body_text),
+                });
+                return;
+            }
+
+            yield Ok(StreamEvent::Start);
+
+            let mut text_buf = String::new();
+            let mut usage = Usage::default();
+            let mut stop_reason = StopReason::Stop;
+            let mut line_buf = String::new();
+
+            let mut byte_stream = resp.bytes_stream();
+            use futures::StreamExt;
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk_bytes = match chunk_result {
+                    Ok(b) => b,
+                    Err(e) => {
+                        yield Err(ProviderError::Network(e));
+                        return;
+                    }
+                };
+
+                let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+                line_buf.push_str(&chunk_str);
+
+                while let Some(newline_pos) = line_buf.find('\n') {
+                    let line: String = line_buf.drain(..=newline_pos).collect();
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let data = match parse_sse_line(line) {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    let v: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(val) => val,
+                        Err(_) => continue,
+                    };
+
+                    // Heuristic parsing: collect any text delta we can find.
+                    if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                        text_buf.push_str(delta);
+                        yield Ok(StreamEvent::TextDelta(delta.to_string()));
+                        continue;
+                    }
+
+                    // Some events include {"type":"response.completed","response":{...}}.
+                    if let Some(r) = v.get("response") {
+                        if let Some(u) = r.get("usage") {
+                            usage.total_tokens = u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(usage.total_tokens);
+                            usage.input_tokens = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(usage.input_tokens);
+                            usage.output_tokens = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(usage.output_tokens);
+                        }
+                        if let Some(sr) = r.get("status").and_then(|x| x.as_str()) {
+                            if sr == "completed" {
+                                stop_reason = StopReason::Stop;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let message = AssistantMessage {
+                content: vec![ContentBlock::Text(TextContent { text: text_buf })],
+                model: model_id,
+                provider: provider_id,
+                usage: Some(usage),
+                stop_reason,
+            };
+
+            yield Ok(StreamEvent::Done { message });
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Provider impl
 // ---------------------------------------------------------------------------
 
@@ -347,6 +603,11 @@ impl Provider for OpenAiProvider {
         context: &ChatContext,
         options: &RequestOptions,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
+        // Codex OAuth uses OpenAI "responses"-style streaming via ChatGPT backend.
+        if model.api == Api::OpenaiResponses {
+            return self.stream_responses(model, context, options);
+        }
+
         let api_key = match &options.api_key {
             Some(k) => k.clone(),
             None => {
