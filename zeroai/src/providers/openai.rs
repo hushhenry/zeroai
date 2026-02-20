@@ -350,6 +350,8 @@ struct ResponsesInputMessage {
 enum ResponsesInputContent {
     #[serde(rename = "input_text")]
     InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
 }
 
 #[derive(Serialize)]
@@ -433,13 +435,28 @@ impl OpenAiProvider {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    // In OpenAI Responses API, assistant messages are model outputs → use output_text.
                     input.push(ResponsesInputMessage {
                         role: "assistant".into(),
-                        content: vec![ResponsesInputContent::InputText { text }],
+                        content: vec![ResponsesInputContent::OutputText { text }],
                     });
                 }
-                Message::ToolResult(_t) => {
-                    // Ignore tool results in the input for now.
+                Message::ToolResult(t) => {
+                    // Codex OAuth backend doesn't accept role=tool. Encode tool result as a user message.
+                    let text = t
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let wrapped = format!("Tool `{}` result: {}", t.tool_name, text);
+                    input.push(ResponsesInputMessage {
+                        role: "user".into(),
+                        content: vec![ResponsesInputContent::InputText { text: wrapped }],
+                    });
                 }
             }
         }
@@ -539,6 +556,8 @@ impl OpenAiProvider {
             yield Ok(StreamEvent::Start);
 
             let mut text_buf = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut cur_tool: Option<(String, String, String)> = None; // (id, name, args_json_str)
             let mut usage = Usage::default();
             let mut stop_reason = StopReason::Stop;
             let mut line_buf = String::new();
@@ -575,11 +594,95 @@ impl OpenAiProvider {
                         Err(_) => continue,
                     };
 
-                    // Heuristic parsing: collect any text delta we can find.
+                    // --- Text deltas (OpenAI Responses stream)
+                    if let Some(typ) = v.get("type").and_then(|x| x.as_str()) {
+                        if typ == "response.output_text.delta" {
+                            if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                                text_buf.push_str(delta);
+                                yield Ok(StreamEvent::TextDelta(delta.to_string()));
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Fallback: some backends just send {"delta":"..."}
                     if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
                         text_buf.push_str(delta);
                         yield Ok(StreamEvent::TextDelta(delta.to_string()));
                         continue;
+                    }
+
+                    // --- Tool calls (OpenAI Responses stream)
+                    // Events we try to support:
+                    // - response.output_item.added  (item.type=function_call)
+                    // - response.function_call_arguments.delta
+                    // - response.output_item.done
+                    if let Some(typ) = v.get("type").and_then(|x| x.as_str()) {
+                        match typ {
+                            "response.output_item.added" => {
+                                if let Some(item) = v.get("item") {
+                                    let item_type = item.get("type").and_then(|x| x.as_str());
+                                    if item_type == Some("function_call") {
+                                        let id = item
+                                            .get("id")
+                                            .and_then(|x| x.as_str())
+                                            .or_else(|| item.get("call_id").and_then(|x| x.as_str()))
+                                            .unwrap_or("toolcall");
+                                        let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("function");
+                                        let args = item
+                                            .get("arguments")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("{}");
+
+                                        let index = tool_calls.len();
+                                        cur_tool = Some((id.to_string(), name.to_string(), args.to_string()));
+                                        yield Ok(StreamEvent::ToolCallStart {
+                                            index,
+                                            id: id.to_string(),
+                                            name: name.to_string(),
+                                        });
+                                        if !args.is_empty() {
+                                            yield Ok(StreamEvent::ToolCallDelta {
+                                                index,
+                                                delta: args.to_string(),
+                                            });
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            "response.function_call_arguments.delta" => {
+                                if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                                    if let Some((_id, _name, args_buf)) = cur_tool.as_mut() {
+                                        args_buf.push_str(delta);
+                                        let index = tool_calls.len();
+                                        yield Ok(StreamEvent::ToolCallDelta {
+                                            index,
+                                            delta: delta.to_string(),
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+                            "response.output_item.done" => {
+                                if let Some(item) = v.get("item") {
+                                    let item_type = item.get("type").and_then(|x| x.as_str());
+                                    if item_type == Some("function_call") {
+                                        // Finalize tool call
+                                        if let Some((id, name, args_str)) = cur_tool.take() {
+                                            let args_json = serde_json::from_str(&args_str).unwrap_or_else(|_| json!({"_raw": args_str}));
+                                            let tc = ToolCall { id: id.clone(), name: name.clone(), arguments: args_json };
+                                            let index = tool_calls.len();
+                                            tool_calls.push(tc.clone());
+                                            yield Ok(StreamEvent::ToolCallEnd { index, tool_call: tc });
+                                            stop_reason = StopReason::ToolUse;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
 
                     // Some events include {"type":"response.completed","response":{...}}.
@@ -591,15 +694,26 @@ impl OpenAiProvider {
                         }
                         if let Some(sr) = r.get("status").and_then(|x| x.as_str()) {
                             if sr == "completed" {
-                                stop_reason = StopReason::Stop;
+                                // keep existing stop_reason unless tool use was detected
+                                if stop_reason == StopReason::Stop {
+                                    stop_reason = StopReason::Stop;
+                                }
                             }
                         }
                     }
                 }
             }
 
+            let mut content: Vec<ContentBlock> = Vec::new();
+            if !text_buf.is_empty() {
+                content.push(ContentBlock::Text(TextContent { text: text_buf }));
+            }
+            for tc in &tool_calls {
+                content.push(ContentBlock::ToolCall(tc.clone()));
+            }
+
             let message = AssistantMessage {
-                content: vec![ContentBlock::Text(TextContent { text: text_buf })],
+                content,
                 model: model_id,
                 provider: provider_id,
                 usage: Some(usage),
